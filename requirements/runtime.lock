@@ -1,0 +1,2 @@
+# Regenerate deliberately when changing the validated reference environment.
+numpy==2.3.5

@@ -1,0 +1,29 @@
+name: CPU reference
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unittest:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+        python-version: ["3.11", "3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements/runtime.lock
+      - run: python -m pip install --requirement requirements/build.lock --requirement requirements/runtime.lock
+      - run: make test PYTHON=python
+      - run: make smoke PYTHON=python
+      - run: python -m pip wheel . --no-deps --no-build-isolation --wheel-dir /tmp/harpq-wheel
