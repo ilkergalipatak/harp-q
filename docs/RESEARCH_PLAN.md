@@ -1,6 +1,6 @@
 # HARP-Q research plan
 
-Last updated: 2026-08-04
+Last updated: 2026-08-09
 
 ## Research question
 
@@ -86,16 +86,20 @@ global allocation. Measure perplexity/task quality and serialized bytes, includi
 - profile target NVMe, filesystem, RAM, PCIe, H2D, and CUDA copy engines;
 - decide tile aggregation from measured latency/bandwidth and 4 KiB alignment;
 - introduce a coalescing plan so physical bytes and useful bytes remain explicit;
-- implement registered pinned-RAM ring buffers;
+- registered pinned-RAM ring buffers: correctness slice implemented with fixed aligned slots,
+  move-only leases, whole-allocation registration, and fail-closed teardown; capacity/throughput
+  tuning remains;
 - implement `io_uring + O_DIRECT` reads with bounded queue depth and cancellation;
-- validate CRC after reads and preserve base-prefix fallback on late/corrupt optional packets.
+- validate CRC after reads and preserve base-prefix fallback on late/corrupt optional packets
+  (implemented for the synchronous buffered `pread` oracle; repeat differentially for direct I/O).
 
 ### WP3 — CUDA execution (Linux)
 
-- start with dequantize-plus-cuBLAS as an oracle;
-- implement fused progressive GEMV for batch-one decode;
+- dequantize-plus-cuBLAS oracle: implemented;
+- fused progressive GEMV for batch-one decode: correctness path implemented, optimization pending;
 - implement GEMM path for prefill/small batches;
-- add PyTorch C++/CUDA custom op and stream/event DAG;
+- add PyTorch C++/CUDA custom op; the registered H2D-to-compute stream/event edge is implemented,
+  while the full model execution DAG remains;
 - compare each prefix against NumPy and measure static W4, H2D, and overlap gates.
 
 Arithmetic tolerances are fixed before performance tuning: the FP32 materialize-plus-cuBLAS oracle
@@ -146,8 +150,9 @@ median/p95/p99 inter-token latency, tokens/s, physical and useful SSD bytes/toke
 cache hit rate, deadline misses, overlap, VRAM/RAM use, and quality. A “Pareto improvement” requires
 matched hardware, model, workload, and memory budget.
 
-Mac CPU/MPS results establish determinism and correctness only. CUDA, NVMe, `io_uring`, and model
-throughput claims remain untested until the Linux phase.
+Mac CPU/MPS results establish determinism and correctness only. The native Linux host now has
+bounded CUDA correctness plus NVMe/`io_uring` capability evidence; end-to-end runtime overlap,
+tail-latency, model throughput, quality, and Pareto gates remain untested.
 
 ## Principal risks and mitigations
 

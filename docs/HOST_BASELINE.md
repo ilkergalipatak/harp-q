@@ -3,8 +3,11 @@
 Last verified: 2026-08-09. This is a small reproducibility summary; raw passive, active, and
 microbenchmark outputs remain ignored artifacts on the measured host.
 
-CUDA correctness and microbenchmark evidence below was rebuilt from clean source commit
-`2a6c481a077fd11e46fc5e68a6da10b78389a9d5` on branch `main`.
+The performance measurements below were rebuilt from clean source commit
+`2a6c481a077fd11e46fc5e68a6da10b78389a9d5`. The newer packet-ring and `pread -> H2D`
+correctness evidence was rebuilt separately from clean source commit
+`9cc7dc593ab8c650dd7d21a41dd31e4b2492e246`. Both commits are on branch `main`; no old
+performance number is relabeled as a result from the newer runtime.
 
 ## Host
 
@@ -30,11 +33,21 @@ Other installed NVMe devices and unmounted partitions were not modified.
 
 ## Verified reference gates
 
-- The repository was clean at commit `2a6c481a077fd11e46fc5e68a6da10b78389a9d5`.
-- All 63 Python CPU/reference tests passed on Python 3.12.3 and NumPy 2.3.5.
-- A clean CUDA-OFF CMake run passed the native CPU test and recorded four explicit CUDA skips.
-- A clean CUDA-ON `sm_89` CMake run passed all five tests: stage codec, materialize-plus-cuBLAS
-  oracle, fused progressive GEMV, H2D smoke, and exploratory GEMV benchmark smoke.
+- The latest runtime repository was clean at commit
+  `9cc7dc593ab8c650dd7d21a41dd31e4b2492e246`.
+- All 67 Python CPU/reference tests passed on Python 3.12.3 and NumPy 2.3.5.
+- A clean CUDA-OFF CMake run passed stage codec, packet-ring, and buffered-`pread` tests and
+  recorded five explicit CUDA skips.
+- A clean CUDA-ON `sm_89` CMake run passed all eight tests: the three CPU tests,
+  materialize-plus-cuBLAS oracle, fused progressive GEMV, registered CUDA packet ring, H2D smoke,
+  and exploratory GEMV benchmark smoke.
+- `native.cuda_packet_ring` verified byte equality along the canonical padded path from buffered
+  pread, through a registered host slot and async H2D, to a compute-stream event wait. It also
+  covered pending-slot non-reuse, facade/lease teardown order, and exact-or-fail registration.
+  Injected event/stream/device/unregister failures exercised the fail-closed policy; unprovable DMA
+  safety and failed unregister terminated with `SIGABRT` rather than recycle or free the slot.
+- CUDA `AUTO` with the GPU hidden passed the CPU tests and explicitly skipped all five CUDA tests;
+  CUDA `ON` with the GPU hidden failed as required.
 - The CUDA driver probe completed with a positive device count.
 - A one-entry `io_uring_setup` syscall succeeded.
 - A bounded active fio run verified `io_uring + O_DIRECT` on the target ext4 filesystem.
@@ -127,6 +140,25 @@ Raw outputs are ignored under `benchmarks/results/` on the measured host:
 | `2a6c481-h2d-size-sweep.jsonl` | `1ca5067410ef2c7001cef14eaf7e32ccc6adef8ace604fd695a475cc8cff5fe5` |
 | `2a6c481-gpu-snapshot-before.txt` | `0db7066e115d2ca8a794abc8f771ac2efdb42832f35f1422bd3c51640966dbf6` |
 | `2a6c481-gpu-snapshot-after.txt` | `c9bf9147097ad08eefbf9222d50f6013f150c4a5397a4bcc926b88122c00e04d` |
+
+The later registered-ring correctness gate used the clean `9cc7dc5` clone:
+
+```sh
+make check PYTHON=.venv/bin/python \
+  NATIVE_BUILD_DIR=build/evidence-9cc7dc5-cpu NATIVE_CUDA=OFF
+
+cmake -S . -B build/evidence-9cc7dc5-cuda \
+  -DHARPQ_ENABLE_CUDA=ON -DBUILD_TESTING=ON \
+  -DCMAKE_CXX_COMPILER=/usr/bin/g++-12 \
+  -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-12 \
+  -DCMAKE_CUDA_ARCHITECTURES=89
+cmake --build build/evidence-9cc7dc5-cuda --parallel
+ctest --test-dir build/evidence-9cc7dc5-cuda --output-on-failure
+```
+
+This was a functional gate only; it produced no new performance claim or benchmark artifact. The
+same commit's [CPU reference workflow](https://github.com/ilkergalipatak/harp-q/actions/runs/31330702569)
+completed successfully.
 
 ## Toolchain note
 
