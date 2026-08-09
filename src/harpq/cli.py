@@ -40,7 +40,9 @@ def _doctor(arguments: argparse.Namespace) -> int:
         "reference_tests_supported": True,
         "cuda_driver_device_available": profile.cuda_available,
         "nvidia_performance_tests_supported": False,
-        "nvidia_performance_tests_reason": "CUDA implementation and Linux acceptance tests are pending",
+        "nvidia_performance_tests_reason": (
+            "fused CUDA kernels and Linux performance acceptance tests are pending"
+        ),
     }
     if arguments.json:
         print(json.dumps(report, indent=2, sort_keys=True))

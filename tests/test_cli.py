@@ -20,6 +20,8 @@ class CliTests(unittest.TestCase):
         report = json.loads(output.getvalue())
         self.assertEqual(result, 0)
         self.assertTrue(report["reference_tests_supported"])
+        self.assertFalse(report["nvidia_performance_tests_supported"])
+        self.assertIn("fused CUDA kernels", report["nvidia_performance_tests_reason"])
 
     def test_demo_writes_functional_summary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

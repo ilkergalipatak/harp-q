@@ -1,0 +1,30 @@
+cmake_minimum_required(VERSION 3.24)
+
+project(HARPQ VERSION 0.1.0 LANGUAGES CXX)
+
+set(HARPQ_ENABLE_CUDA "AUTO" CACHE STRING "Enable CUDA targets: AUTO, ON, or OFF")
+set_property(CACHE HARPQ_ENABLE_CUDA PROPERTY STRINGS AUTO ON OFF)
+string(TOUPPER "${HARPQ_ENABLE_CUDA}" HARPQ_ENABLE_CUDA)
+if(NOT HARPQ_ENABLE_CUDA MATCHES "^(AUTO|ON|OFF)$")
+  message(FATAL_ERROR "HARPQ_ENABLE_CUDA must be AUTO, ON, or OFF")
+endif()
+
+set(HARPQ_HAS_CUDA OFF)
+if(NOT HARPQ_ENABLE_CUDA STREQUAL "OFF")
+  include(CheckLanguage)
+  check_language(CUDA)
+  if(CMAKE_CUDA_COMPILER)
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+      set(CMAKE_CUDA_ARCHITECTURES 89 CACHE STRING "CUDA architectures for HARP-Q")
+    endif()
+    enable_language(CUDA)
+    set(HARPQ_HAS_CUDA ON)
+  elseif(HARPQ_ENABLE_CUDA STREQUAL "ON")
+    message(FATAL_ERROR "HARPQ_ENABLE_CUDA=ON, but no CUDA compiler was found")
+  endif()
+endif()
+
+message(STATUS "HARP-Q CUDA targets: ${HARPQ_HAS_CUDA} (requested ${HARPQ_ENABLE_CUDA})")
+
+include(CTest)
+add_subdirectory(native)

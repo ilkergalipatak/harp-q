@@ -104,6 +104,9 @@ Each of four stages approximates the previous FP32 residual using signed int2 co
 group scales. The encoder forms the next residual from the exact FP16-decoded stage, so decoder and
 encoder prefixes agree. Prefixes 1–4 correspond to nominal 2/4/6/8 code bits per padded weight.
 
-The CPU reference operation accumulates `X @ residual_stage.T` independently. A future fused CUDA
-kernel may change arithmetic ordering but must match this observable result within the declared
-tolerance for each prefix.
+The CPU reference operation accumulates `X @ residual_stage.T` independently. Serialized bytes and
+materialized FP32 prefix weights must match exactly. For the current FP32 CUDA cuBLAS oracle, every
+finite output element must satisfy
+`abs(actual - expected) <= 1e-4 + 1e-4 * abs(expected)` for every prefix. A fused kernel may change
+arithmetic ordering or output dtype only after a separate tolerance is recorded before tuning; see
+D-018 in `DECISIONS.md`.

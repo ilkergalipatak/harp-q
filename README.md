@@ -6,9 +6,10 @@ bir prototiptir. Ağırlıklar `128 x 128` tile'lara ve sıralı `2+2+2+2` bit r
 ayrılır. Base katman her zaman hesaplanabilir; scheduler zaman ve cache bütçesi elverdikçe residual
 katmanları ekler.
 
-Bu depo şimdilik taşınabilir NumPy reference implementasyonunu hedefler. Mac sonuçları yalnızca
-fonksiyonel doğruluk içindir. CUDA, gerçek async NVMe I/O ve NVIDIA performans ölçümleri Linux
-aşamasına aittir.
+NumPy uygulaması formatın ve sayısal davranışın taşınabilir referansıdır. C++17 katmanı aynı stage
+payload'larını bağımsız olarak decode eder; CUDA doğruluk oracle'ı seçilen residual prefix'i GPU'da
+açıp cuBLAS ile hesaplar. Mac sonuçları yalnızca fonksiyonel doğruluk içindir. Fused kernel, gerçek
+async NVMe I/O ve NVIDIA performans ölçümleri native Linux aşamasına aittir.
 
 ## Hızlı başlangıç
 
@@ -19,6 +20,12 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements/runtime.lock
 make test PYTHON=.venv/bin/python
 make demo PYTHON=.venv/bin/python
+```
+
+Python, C++ ve açık CUDA-skip kontratını birlikte doğrulamak için CMake 3.24+ ile:
+
+```sh
+make check PYTHON=.venv/bin/python
 ```
 
 Codex Desktop'ın bu Mac'teki paketli Python ortamıyla kurulum yapmadan test etmek için:
@@ -53,6 +60,33 @@ PYTHONPATH=src python -m harpq profile-host --active \
 Aktif profil 64 MiB RAM copy testi, geçici 256 MiB `fio + io_uring + O_DIRECT` testi ve sistemde
 kuruluysa CUDA `deviceQuery`/`bandwidthTest` örneklerini çalıştırır. Geçici fio dizini sonunda
 silinir.
+
+## Native doğruluk katmanı
+
+CUDA olmayan bir hostta decoder/oracle ve açık skip testi:
+
+```sh
+cmake -S . -B build/native-cpu -DHARPQ_ENABLE_CUDA=OFF -DBUILD_TESTING=ON
+cmake --build build/native-cpu --parallel
+ctest --test-dir build/native-cpu --output-on-failure
+```
+
+RTX 4090 Ubuntu hostunda CUDA 12.0 ile doğrulanan yapılandırma:
+
+```sh
+cmake -S . -B build/native-cuda \
+  -DHARPQ_ENABLE_CUDA=ON -DBUILD_TESTING=ON \
+  -DCMAKE_CXX_COMPILER=/usr/bin/g++-12 \
+  -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-12 \
+  -DCMAKE_CUDA_ARCHITECTURES=89
+cmake --build build/native-cuda --parallel
+ctest --test-dir build/native-cuda --output-on-failure
+```
+
+`HARPQ_ENABLE_CUDA=ON` toolkit bulunamazsa configure aşamasında, çalışan GPU görünmezse test
+aşamasında hata verir. `AUTO` toolkit'i keşfeder; `OFF` CPU testini ve gerekçeli CUDA skip kaydını
+çalıştırır. CUDA oracle doğruluk içindir: ağırlığı FP32 olarak materialize ettiği için fused kernel
+throughput sonucu olarak kullanılamaz.
 
 ## Tasarım sınırı
 

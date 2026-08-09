@@ -37,7 +37,9 @@ Acceptance gates from the project plan:
 - pinned H2D reaches at least 80% of its isolated microbenchmark;
 - `O_DIRECT` runtime reads reach at least 75% of matched fio bandwidth;
 - read amplification, physical bytes divided by useful packet bytes, is at most 1.2;
-- every CUDA prefix is within the documented numeric tolerance of the reference.
+- every FP32 CUDA-oracle prefix satisfies
+  `abs(actual - expected) <= 1e-4 + 1e-4 * abs(expected)` for each finite element. A lower-precision
+  fused path requires its own predeclared dtype/order-specific tolerance.
 
 If a gate fails, report the value and reason; never silently relax the denominator or compare
 different shapes.

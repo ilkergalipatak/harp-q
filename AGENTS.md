@@ -21,12 +21,14 @@ code must preserve its observable semantics.
 
 ## Commands
 
-Create an environment with Python 3.11+ and install `requirements/runtime.lock`, then run:
+Create an environment with Python 3.11+, CMake 3.24+, and a C++17 compiler. Install
+`requirements/runtime.lock`, then run:
 
 ```sh
 make test
 make smoke
 make demo
+make check
 ```
 
 To reproduce the validated packaging toolchain, install `requirements/build.lock` as well. Build
@@ -41,6 +43,11 @@ Inside Codex Desktop on the original Mac, the bundled interpreter can be selecte
 ```sh
 make test PYTHON=/Users/ilkergalipatak/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3
 ```
+
+CPU-only native validation must configure with `-DHARPQ_ENABLE_CUDA=OFF`. On the RTX 4090 Ubuntu
+host use `-DHARPQ_ENABLE_CUDA=ON`, GCC/G++ 12 as the CUDA host compiler, and architecture `89`.
+`AUTO` is convenient for discovery but must not replace the explicit `ON` gate in NVIDIA CI or
+evidence runs.
 
 Do not silently skip a test because CUDA, `io_uring`, or `O_DIRECT` is unavailable. Platform-only
 tests must report an explicit skip reason. CPU reference tests must pass on both Mac and Linux.
