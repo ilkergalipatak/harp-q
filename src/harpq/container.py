@@ -503,6 +503,9 @@ def write_container(
                             metadata=packet.metadata,
                         )
                     )
+                padded_end = _align_up(stream.tell())
+                if padded_end > stream.tell():
+                    stream.write(b"\x00" * (padded_end - stream.tell()))
             pack_infos.append(
                 PackInfo(name=pack_name, size=pack_path.stat().st_size, sha256=sha256_file(pack_path))
             )

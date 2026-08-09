@@ -230,6 +230,67 @@ Always label this denominator `exploratory_matched_naive_baseline` and emit
 requires an optimized production or library-parity static-W4 implementation under matched shape,
 warm-up, clocks, and measurement settings.
 
+## D-022 — Canonical v1 packs have a zero-padded physical tail
+
+Status: accepted; backward-compatible writer clarification.
+
+After writing the final payload, the canonical v1 writer pads every non-empty pack with zero bytes
+to the manifest's 4096-byte alignment. Packet offsets, logical lengths, index records, and packet
+CRC32C values do not change. Pack size and SHA-256 include all inter-packet and terminal padding.
+An empty `boot.pack` remains zero bytes.
+
+This does not increment the format version: existing readers already accept unreferenced trailing
+bytes, and new buffered readers must continue to accept legacy unpadded v1 packs. A packet is safe
+for a full aligned direct read only when
+`offset + align_up(logical_length, alignment) <= declared_pack_size`. A legacy terminal short tail
+may use an explicit buffered compatibility path; it must never be silently presented as successful
+`O_DIRECT` evidence.
+
+## D-023 — The packet ring separates I/O geometry from allocation geometry
+
+Status: accepted for the synchronous correctness backend.
+
+The CPU-portable packet ring owns one contiguous allocation and move-only, generation-tagged
+leases. Its only normal state path is
+`free -> filling -> ready -> H2D-in-flight -> free`; cancellation may return filling/ready slots to
+free, but an in-flight slot is not recycled until a completion object proves it safe. Leases share
+storage ownership so destroying the facade cannot invalidate a live slot.
+
+Format I/O alignment and host allocation alignment are distinct. The v1 I/O alignment is 4096,
+while allocation alignment is at least `max(io_alignment, host_page_size)` and slot stride is
+rounded to that allocation alignment. This matters on the Apple-silicon reference host, whose page
+size is 16384 bytes, even though the Linux target currently uses 4096 for both.
+
+The first `pread` backend is buffered and synchronous. It validates extents before the syscall,
+retries `EINTR`/partial reads, checks CRC32C over logical bytes only, and records logical bytes,
+planned physical bytes, actual file bytes, and syscall count separately. Required packet failure is
+fatal; an optional residual can become explicitly unavailable, while ring-full and cancellation
+remain distinct non-fallback outcomes. These results are functional evidence only, never NVMe or
+overlap performance evidence.
+
+## D-024 — CUDA registration ownership follows every slot lease
+
+Status: accepted for the first registered-host-memory adapter.
+
+The CUDA facade registers the ring's complete contiguous backing allocation once with
+`cudaHostRegisterDefault`. Registration is exact-or-fail: there is no pageable fallback and no
+silent reduction in slot count. CUDA-specific filling, ready, and in-flight leases all retain one
+shared control object, so destroying the facade cannot destroy the copy stream, completion events,
+host registration, or backing allocation while any slot is still observable.
+
+The adapter owns one nonblocking H2D stream and one disable-timing completion event per slot. It
+copies logical packet bytes, records the event, and exposes `MakeStreamWait` so a compute stream can
+depend on that exact copy without exposing the raw copy stream. The synchronous `pread` adapter can
+load directly through the registered ring and wraps the core ready lease before it leaves the CUDA
+facade. Validation or enqueue failure retains the caller's ready lease; a failure after work may
+have been accepted first establishes stream or device completion before returning.
+
+Host-memory safety takes precedence over graceful recovery. If event synchronization, owned-stream
+synchronization, and the captured-device synchronization fallback all fail to prove that DMA has
+stopped, the process terminates rather than recycle a slot or unregister/free its backing memory.
+Likewise, teardown does not free an allocation after a failed `cudaHostUnregister`. A later faulted
+ring/quarantine mode may replace this fail-stop policy, but silent reuse is forbidden.
+
 ## Open decisions for Linux evidence
 
 - final tile aggregation and coalescing metadata;

@@ -9,8 +9,11 @@ katmanları ekler.
 NumPy uygulaması formatın ve sayısal davranışın taşınabilir referansıdır. C++17 katmanı aynı stage
 payload'larını bağımsız olarak decode eder; CUDA doğruluk oracle'ı seçilen residual prefix'i GPU'da
 açıp cuBLAS ile hesaplar. İlk batch-one fused GEMV ise FP32 ağırlık oluşturmadan device-resident
-int2 code ve FP16 scale verisini doğrudan tüketir. Mac sonuçları yalnızca fonksiyonel doğruluk
-içindir. Gerçek async NVMe I/O ve NVIDIA performans kabul ölçümleri native Linux aşamasına aittir.
+int2 code ve FP16 scale verisini doğrudan tüketir. Native runtime ayrıca hizalı, lease tabanlı bir
+packet ring; doğruluk-odaklı buffered `pread`; whole-allocation `cudaHostRegister`; async H2D ve
+compute-stream event bağımlılığını içerir. Mac sonuçları yalnızca fonksiyonel doğruluk içindir.
+Gerçek `io_uring + O_DIRECT` NVMe I/O ve NVIDIA performans kabul ölçümleri native Linux aşamasına
+aittir.
 
 ## Hızlı başlangıç
 
@@ -86,8 +89,10 @@ ctest --test-dir build/native-cuda --output-on-failure
 
 `HARPQ_ENABLE_CUDA=ON` toolkit bulunamazsa configure aşamasında, çalışan GPU görünmezse test
 aşamasında hata verir. `AUTO` toolkit'i keşfeder; `OFF` CPU testini ve gerekçeli CUDA skip kaydını
-çalıştırır. CUDA CTest; materialize-plus-cuBLAS oracle'ını, doğrudan-decode fused GEMV'i ve küçük
-pinned-H2D smoke testini ayrı ayrı gösterir.
+çalıştırır. CPU CTest stage codec, packet-ring state machine ve buffered `pread` politikasını ayrı
+ayrı gösterir. CUDA CTest bunlara ek olarak materialize-plus-cuBLAS oracle'ını, doğrudan-decode
+fused GEMV'i, registered-ring `pread -> H2D -> stream-wait` zincirini ve küçük pinned-H2D smoke
+testini çalıştırır.
 
 Gelecekteki `O_DIRECT` ring ile aynı bellek sahipliği modelini kullanan izole H2D denominator'ı:
 

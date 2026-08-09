@@ -4,6 +4,12 @@ if(CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 11.8)
   message(FATAL_ERROR "HARP-Q CUDA targets require CUDA toolkit 11.8 or newer")
 endif()
 
+if(NOT TARGET HARPQ::packet_io)
+  message(FATAL_ERROR
+    "HARP-Q CUDA packet-ring targets currently require POSIX packet I/O; "
+    "configure with HARPQ_ENABLE_CUDA=OFF on unsupported hosts")
+endif()
+
 add_library(harpq_cuda_oracle STATIC
   ../src/cuda_oracle.cu
 )
@@ -45,6 +51,26 @@ target_link_libraries(harpq_progressive_gemv
 set_target_properties(harpq_progressive_gemv PROPERTIES
   CXX_EXTENSIONS OFF
   CUDA_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE ON
+)
+
+add_library(harpq_cuda_packet_ring STATIC
+  ../src/cuda_packet_ring.cpp
+)
+add_library(HARPQ::cuda_packet_ring ALIAS harpq_cuda_packet_ring)
+target_include_directories(harpq_cuda_packet_ring
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include>
+    $<INSTALL_INTERFACE:include>
+)
+target_compile_features(harpq_cuda_packet_ring PUBLIC cxx_std_17)
+target_link_libraries(harpq_cuda_packet_ring
+  PUBLIC
+    HARPQ::packet_io
+    CUDA::cudart
+)
+set_target_properties(harpq_cuda_packet_ring PROPERTIES
+  CXX_EXTENSIONS OFF
   POSITION_INDEPENDENT_CODE ON
 )
 
@@ -108,6 +134,18 @@ if(BUILD_TESTING)
   )
   add_test(NAME native.progressive_gemv COMMAND harpq_progressive_gemv_test)
 
+  add_executable(harpq_cuda_packet_ring_test
+    ../tests/cuda_packet_ring_test.cpp
+  )
+  target_compile_features(harpq_cuda_packet_ring_test PRIVATE cxx_std_17)
+  target_link_libraries(harpq_cuda_packet_ring_test
+    PRIVATE HARPQ::cuda_packet_ring)
+  set_target_properties(harpq_cuda_packet_ring_test PROPERTIES
+    CXX_EXTENSIONS OFF
+  )
+  add_test(NAME native.cuda_packet_ring COMMAND harpq_cuda_packet_ring_test)
+  set_tests_properties(native.cuda_packet_ring PROPERTIES TIMEOUT 30)
+
   add_test(
     NAME native.h2d_smoke
     COMMAND harpq_h2d_benchmark
@@ -137,6 +175,7 @@ if(BUILD_TESTING)
     set_tests_properties(
       native.cuda_oracle
       native.progressive_gemv
+      native.cuda_packet_ring
       native.h2d_smoke
       native.gemv_benchmark_smoke
       PROPERTIES SKIP_RETURN_CODE 77)

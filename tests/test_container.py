@@ -15,7 +15,7 @@ from harpq.container import (
     open_container,
     write_container,
 )
-from harpq.integrity import ChecksumMismatchError
+from harpq.integrity import ChecksumMismatchError, sha256_file
 
 
 def progressive_packets() -> tuple[Packet, ...]:
@@ -89,6 +89,116 @@ class ContainerTests(unittest.TestCase):
                 (destination / "manifest.json").read_text(encoding="utf-8")
             )
             self.assertEqual(serialized_manifest, manifest.to_dict())
+
+    def test_pack_tails_are_zero_padded_and_every_direct_extent_fits(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "model.harpq"
+            write_container(destination, progressive_packets())
+            reader = open_container(destination)
+            records_by_pack = {
+                pack.name: sorted(
+                    (record for record in reader.records if record.pack_name == pack.name),
+                    key=lambda record: record.offset,
+                )
+                for pack in reader.manifest.packs
+            }
+
+            for pack in reader.manifest.packs:
+                pack_bytes = (destination / pack.name).read_bytes()
+                self.assertEqual(len(pack_bytes), pack.size)
+                self.assertEqual(pack.size % PACKET_ALIGNMENT, 0)
+                records = records_by_pack[pack.name]
+                if not records:
+                    self.assertEqual(pack.name, "boot.pack")
+                    self.assertEqual(pack_bytes, b"")
+                    continue
+
+                for record in records:
+                    physical_length = (
+                        (record.length + PACKET_ALIGNMENT - 1)
+                        // PACKET_ALIGNMENT
+                        * PACKET_ALIGNMENT
+                    )
+                    self.assertLessEqual(record.offset + physical_length, pack.size)
+
+                last = records[-1]
+                tail_start = last.offset + last.length
+                self.assertEqual(pack_bytes[tail_start:], b"\x00" * (pack.size - tail_start))
+
+    def test_padding_is_in_pack_sha_but_not_packet_crc(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "model.harpq"
+            write_container(destination, (Packet("base", 0, b"payload"),))
+            reader = open_container(destination)
+            record = reader.record("base")
+            pack_path = destination / record.pack_name
+            padding_offset = record.offset + record.length
+            self.assertLess(padding_offset, pack_path.stat().st_size)
+
+            with pack_path.open("r+b") as stream:
+                stream.seek(padding_offset)
+                stream.write(b"\x01")
+
+            with self.assertRaises(ChecksumMismatchError):
+                open_container(destination)
+            unchecked_reader = open_container(destination, verify=False)
+            packet = unchecked_reader.read_packet("base")
+            self.assertIsNotNone(packet)
+            assert packet is not None
+            self.assertEqual(packet.payload, b"payload")
+
+    def test_legacy_unpadded_v1_pack_remains_buffered_readable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "legacy.harpq"
+            write_container(destination, (Packet("base", 0, b"legacy-payload"),))
+            reader = open_container(destination)
+            record = reader.record("base")
+            pack_path = destination / record.pack_name
+            logical_end = record.offset + record.length
+            with pack_path.open("r+b") as stream:
+                stream.truncate(logical_end)
+
+            manifest_path = destination / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            for pack in manifest["packs"]:
+                if pack["name"] == record.pack_name:
+                    pack["size"] = logical_end
+                    pack["sha256"] = sha256_file(pack_path)
+                    break
+            else:  # pragma: no cover - writer always declares the canonical pack
+                self.fail(f"manifest is missing {record.pack_name}")
+            manifest_path.write_text(
+                json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertNotEqual(logical_end % PACKET_ALIGNMENT, 0)
+            legacy_reader = open_container(destination)
+            packet = legacy_reader.read_packet("base")
+            self.assertIsNotNone(packet)
+            assert packet is not None
+            self.assertEqual(packet.payload, b"legacy-payload")
+
+    def test_container_output_is_deterministic(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = root / "first.harpq"
+            second = root / "second.harpq"
+            metadata = {"model": "synthetic", "revision": 7}
+            write_container(first, progressive_packets(), metadata=metadata)
+            write_container(second, progressive_packets(), metadata=metadata)
+
+            first_files = {
+                path.relative_to(first): path.read_bytes()
+                for path in first.iterdir()
+                if path.is_file()
+            }
+            second_files = {
+                path.relative_to(second): path.read_bytes()
+                for path in second.iterdir()
+                if path.is_file()
+            }
+            self.assertEqual(first_files, second_files)
 
     def test_missing_optional_pack_falls_back_to_available_base(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

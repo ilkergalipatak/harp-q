@@ -18,7 +18,8 @@ model.harpq/
 
 `boot.pack` always exists, including when empty. Stage zero packets live in `base.pack`; stage
 `n > 0` packets live in `refine-n.pack`. A stage-zero packet is required and executable. Higher
-stages are optional and form an ordered dependency chain.
+stages are optional and form an ordered dependency chain. The canonical v1 writer leaves an empty
+`boot.pack` at zero bytes and zero-pads every non-empty pack tail to the manifest alignment.
 
 ## Manifest
 
@@ -31,8 +32,10 @@ stages are optional and form an ordered dependency chain.
 - exact size and SHA-256 of every pack;
 - user/model metadata containing only finite JSON values.
 
-SHA-256 protects immutable whole-file identity and distribution. It is not a substitute for the
-per-packet checksum used after an asynchronous read.
+The declared pack size is its physical file size, including inter-packet and trailing padding.
+SHA-256 protects immutable whole-file identity and distribution and therefore covers those padding
+bytes as well as payloads. It is not a substitute for the per-packet checksum used after an
+asynchronous read.
 
 ## Binary index
 
@@ -50,9 +53,20 @@ packet, logical stage, canonical pack, aligned offset, payload length, CRC32C, d
 optionality, and codec metadata. Length-prefixing makes unknown/truncated records unambiguous while
 keeping the reference reader language-neutral.
 
-Every payload offset is a multiple of 4096. Padding bytes are not part of a packet checksum or
-packet length. A production packer may later coalesce adjacent tile payloads to reduce read
-amplification; such coalescing must remain explicit in the index.
+Every payload offset is a multiple of 4096. The canonical writer fills both inter-packet and final
+pack padding with zeroes. Padding bytes are not part of a packet checksum or packet length: the
+record length and CRC32C cover only the logical payload. A production packer may later coalesce
+adjacent tile payloads to reduce read amplification; such coalescing must remain explicit in the
+index.
+
+For one packet, let `physical_length = ceil(length / alignment) * alignment`. Its extent is safe to
+submit as one complete aligned direct read only when
+`offset + physical_length <= declared_pack_size`. Canonical v1 output satisfies this predicate for
+every packet because non-empty pack tails are padded. A legacy v1 pack whose terminal payload ends
+at an unaligned EOF remains valid and readable through the buffered reader; failing the predicate
+means that terminal extent is not evidence of `O_DIRECT` readiness and requires an explicit
+buffered fallback or rejection by a direct-I/O backend. Readers must not reject such legacy packs
+solely because their total size is unaligned.
 
 The reference scheduler keeps logical resident bytes separate from physical I/O bytes. Until a
 coalescing plan exists, one direct packet read is rounded up to the manifest alignment. Traces

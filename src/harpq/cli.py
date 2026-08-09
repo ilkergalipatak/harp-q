@@ -41,8 +41,9 @@ def _doctor(arguments: argparse.Namespace) -> int:
         "cuda_driver_device_available": profile.cuda_available,
         "nvidia_performance_tests_supported": False,
         "nvidia_performance_tests_reason": (
-            "a correctness-first fused GEMV is implemented; optimized throughput/static-W4 "
-            "validation, the I/O runtime, and model integration are pending"
+            "a correctness-first fused GEMV and registered pread-to-H2D ring are implemented; "
+            "optimized throughput/static-W4 validation, the io_uring/O_DIRECT runtime, and "
+            "model integration are pending"
         ),
     }
     if arguments.json:
