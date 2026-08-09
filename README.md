@@ -11,9 +11,12 @@ payload'larını bağımsız olarak decode eder; CUDA doğruluk oracle'ı seçil
 açıp cuBLAS ile hesaplar. İlk batch-one fused GEMV ise FP32 ağırlık oluşturmadan device-resident
 int2 code ve FP16 scale verisini doğrudan tüketir. Native runtime ayrıca hizalı, lease tabanlı bir
 packet ring; doğruluk-odaklı buffered `pread`; whole-allocation `cudaHostRegister`; async H2D ve
-compute-stream event bağımlılığını içerir. Mac sonuçları yalnızca fonksiyonel doğruluk içindir.
-Gerçek `io_uring + O_DIRECT` NVMe I/O ve NVIDIA performans kabul ölçümleri native Linux aşamasına
-aittir.
+compute-stream event bağımlılığını içerir. Linux'a özgü CPU doğruluk adaptörü, yalnız
+`STATX_DIOALIGN` ile bildirilen geometriyi yetkili kabul ederek `io_uring` ordinary
+`IORING_OP_READ` işlemlerini `O_DIRECT` ile doğrudan packet-ring slotlarına gönderir. Bu ilk
+adaptör fixed-buffer kaydı veya CUDA ömür köprüsü değildir ve NVMe throughput iddiası taşımaz.
+Mac sonuçları yalnızca fonksiyonel doğruluk içindir; NVIDIA ve NVMe performans kabul ölçümleri
+native Linux hostunda ayrıca yapılır.
 
 ## Hızlı başlangıç
 
@@ -70,16 +73,18 @@ silinir.
 CUDA olmayan bir hostta decoder/oracle ve açık skip testi:
 
 ```sh
-cmake -S . -B build/native-cpu -DHARPQ_ENABLE_CUDA=OFF -DBUILD_TESTING=ON
+cmake -S . -B build/native-cpu \
+  -DHARPQ_ENABLE_CUDA=OFF -DHARPQ_ENABLE_IO_URING=OFF -DBUILD_TESTING=ON
 cmake --build build/native-cpu --parallel
 ctest --test-dir build/native-cpu --output-on-failure
 ```
 
-RTX 4090 Ubuntu hostunda CUDA 12.0 ile doğrulanan yapılandırma:
+RTX 4090 Ubuntu hostunda dördüncü dilimin exact-source doğrulaması için kullanılacak açık gate
+yapılandırması:
 
 ```sh
 cmake -S . -B build/native-cuda \
-  -DHARPQ_ENABLE_CUDA=ON -DBUILD_TESTING=ON \
+  -DHARPQ_ENABLE_CUDA=ON -DHARPQ_ENABLE_IO_URING=ON -DBUILD_TESTING=ON \
   -DCMAKE_CXX_COMPILER=/usr/bin/g++-12 \
   -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-12 \
   -DCMAKE_CUDA_ARCHITECTURES=89
@@ -88,11 +93,18 @@ ctest --test-dir build/native-cuda --output-on-failure
 ```
 
 `HARPQ_ENABLE_CUDA=ON` toolkit bulunamazsa configure aşamasında, çalışan GPU görünmezse test
-aşamasında hata verir. `AUTO` toolkit'i keşfeder; `OFF` CPU testini ve gerekçeli CUDA skip kaydını
-çalıştırır. CPU CTest stage codec, packet-ring state machine ve buffered `pread` politikasını ayrı
-ayrı gösterir. CUDA CTest bunlara ek olarak materialize-plus-cuBLAS oracle'ını, doğrudan-decode
-fused GEMV'i, registered-ring `pread -> H2D -> stream-wait` zincirini ve küçük pinned-H2D smoke
-testini çalıştırır.
+aşamasında hata verir. `HARPQ_ENABLE_IO_URING=ON`; Linux, liburing ve kullanılan
+`io_uring_ring_dontfork`/opcode-probe API'leri yoksa configure aşamasında hata verir. Her iki seçenek
+için `AUTO` bağımlılığı keşfeder; `OFF` ilgili test için gerekçeli skip kaydı çalıştırır. CPU CTest
+stage codec, packet-ring state machine ve buffered `pread` politikasını ayrı ayrı gösterir.
+Dördüncü dilimde eklenen Linux direct-I/O testinin sözleşmesi, canonical padded
+pack için `io_uring + O_DIRECT` yolunu buffered `pread` oracle'ıyla fonksiyonel olarak
+karşılaştırmak; legacy unpadded terminal tail'i sessizce fallback yapmak yerine açıkça
+`buffered-only` olarak sınıflandırmaktır. Bu dilimin exact-source sonucu `docs/HANDOFF.md` içinde
+henüz doğrulanmış olarak kaydedilmemiştir. CUDA CTest bunlara ek olarak materialize-plus-cuBLAS
+oracle'ını, doğrudan-decode fused GEMV'i, registered-ring `pread -> H2D -> stream-wait` zincirini ve
+küçük pinned-H2D smoke testini çalıştırır. Direct-I/O tamamlama lease'i henüz CUDA registered-ring
+ömür alanına bağlanmış değildir.
 
 Gelecekteki `O_DIRECT` ring ile aynı bellek sahipliği modelini kullanan izole H2D denominator'ı:
 
@@ -121,6 +133,13 @@ runtime: SSD packets -> host cache -> device cache -> progressive matmul
                              ^             |
                              +-- deadline-aware scheduler + deterministic trace
 ```
+
+Scheduler trace v2, tamamlanmış runtime transferlerini sıralı `ServiceObservation` kayıtlarıyla
+taşır. Referans politika gözlemleri `(service_class, logical_bytes, physical_io_bytes)` tam
+bucket'ında tutar ve yeterli örnek olduğunda kayan pencerenin varsayılan p95 değerini kullanır.
+`critical_path_us` deadline/score girdisidir; isteğe bağlı I/O ve H2D bileşen süreleri yalnız audit
+metadatasıdır ve overlap uydurmak için toplanmaz. Eski trace v1 kayıtları değişmeden okunup replay
+edilir.
 
 Araştırma kapsamı ve iddialar için `docs/RESEARCH_PLAN.md`, önceki çalışmalar için
 `docs/PRIOR_ART.md`, mimari kararlar için `docs/DECISIONS.md`, makine geçişi için

@@ -68,6 +68,15 @@ means that terminal extent is not evidence of `O_DIRECT` readiness and requires 
 buffered fallback or rejection by a direct-I/O backend. Readers must not reject such legacy packs
 solely because their total size is unaligned.
 
+That pack-level predicate is necessary but not sufficient for the Linux direct backend. A runtime
+may submit the extent through `O_DIRECT` only when `statx` returns non-zero `STATX_DIOALIGN` memory
+and offset alignment and the file offset, physical length, and destination satisfy those values.
+The first backend issues ordinary `IORING_OP_READ` operations into aligned `PacketRing` slots; it
+does not use io_uring fixed-buffer registration. If authoritative alignment is unavailable, direct
+I/O is explicitly unsupported. If only the aligned terminal extent crosses a valid legacy EOF, the
+result is explicitly `buffered-only`; selecting the compatible buffered reader is a caller policy,
+not a silent backend fallback. CRC32C continues to cover only the logical packet bytes.
+
 The reference scheduler keeps logical resident bytes separate from physical I/O bytes. Until a
 coalescing plan exists, one direct packet read is rounded up to the manifest alignment. Traces
 record both counters and their ratio; cache capacity is charged only for logical resident bytes.
@@ -126,3 +135,42 @@ arithmetic ordering or output dtype only after a separate tolerance is recorded 
 first FP32 fused GEMV uses
 `abs(actual - expected) <= 2e-4 + 2e-4 * abs(expected)` because it performs a block reduction and
 FMA accumulation directly from int2/FP16 stage views; see D-018 and D-019 in `DECISIONS.md`.
+
+## Scheduler trace v2
+
+Scheduler traces are separate JSON artifacts with `format = "harpq-scheduler-trace"`. Version 2
+extends, but does not change, the container format described above. Its serialized config includes
+`feedback_window_size`, `feedback_min_samples`, and `feedback_quantile`; the defaults select p95
+after at least three samples in a 32-sample rolling window. Each request also carries a non-empty
+`service_class`.
+
+An event may contain an ordered `observations` array. Each `ServiceObservation` contains:
+
+- a globally strictly increasing non-negative `sequence_id` and diagnostic `packet_id`;
+- positive `logical_bytes` and `physical_io_bytes >= logical_bytes`;
+- a non-empty `service_class`;
+- positive `critical_path_us`;
+- optional non-negative `io_service_us` and `h2d_service_us`, neither greater than the critical
+  path.
+
+The feedback key is exactly
+`(service_class, logical_bytes, physical_io_bytes)`; no neighboring-size interpolation or
+cross-class pooling is implicit. Once a bucket reaches its configured minimum, the estimate is the
+nearest-rank configured quantile of its bounded insertion-order window. Otherwise the serialized
+fixed-latency/bandwidth model applies. A request's explicit `transfer_us` overrides both paths.
+Observation ingestion and the scheduling decision are one atomic state transition; failure rolls
+back feedback and sequence state along with the cache.
+
+The decision records a `transfer_estimates` entry for every request with the estimate value, source
+(`request`, `feedback`, or `config`), and feedback sample count. This is a hypothetical reload cost
+used for scoring even when the packet is resident; `loaded`, `copy_time_us`, and byte counters remain
+the authority for actual transfer work. `critical_path_us` is the only observation used by policy.
+I/O and H2D component fields are audit metadata and must not be summed to manufacture an overlap
+estimate.
+
+Readers continue to accept version 1 traces and replay them with their original explicit or
+modeled transfer costs. A v1 trace omits feedback config, request service classes, observations,
+and transfer estimates; those fields cannot be silently interpreted as v1 semantics even when an
+array is empty or a value equals the v2 default. Conversely, every v2 feedback field is required.
+Known trace versions use an exact field set at the root and at each config/cache/event/request/
+decision/observation/estimate object, so unknown or missing fields fail before replay.

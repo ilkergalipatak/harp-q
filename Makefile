@@ -2,6 +2,7 @@ PYTHON ?= python3
 CMAKE ?= cmake
 NATIVE_BUILD_DIR ?= build/native-cpu
 NATIVE_CUDA ?= OFF
+NATIVE_IO_URING ?= AUTO
 
 .PHONY: test smoke demo golden-check native-configure native-build native-test check
 
@@ -18,7 +19,7 @@ golden-check:
 	PYTHONPATH=src $(PYTHON) scripts/generate_native_golden.py --check
 
 native-configure:
-	$(CMAKE) -S . -B $(NATIVE_BUILD_DIR) -DHARPQ_ENABLE_CUDA=$(NATIVE_CUDA) -DBUILD_TESTING=ON
+	$(CMAKE) -S . -B $(NATIVE_BUILD_DIR) -DHARPQ_ENABLE_CUDA=$(NATIVE_CUDA) -DHARPQ_ENABLE_IO_URING=$(NATIVE_IO_URING) -DBUILD_TESTING=ON
 
 native-build: native-configure
 	$(CMAKE) --build $(NATIVE_BUILD_DIR) --parallel

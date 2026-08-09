@@ -49,7 +49,10 @@ The Mac reference implementation is deliberately simple and auditable:
 - an exact precedence-aware multiple-choice knapsack allocates packet prefixes offline;
 - the reference scheduler uses distortion gain, reuse, importance, cache state, transfer time,
   kernel cost, capacity, deadlines, minimum residency, and hysteresis;
-- every scheduling event is serialized and replayed exactly.
+- completed runtime service can be supplied as ordered observations; exact service/byte buckets use
+  a bounded rolling p95 only after the configured minimum sample count;
+- every scheduling event, observation, estimate source, and decision is serialized and replayed
+  exactly, while legacy trace v1 remains replayable.
 
 This is a correctness baseline, not the final quantizer. In particular, the current encoder measures
 activation/Hessian-aware distortion but does not yet optimize codes with a GPTQ-style second-order
@@ -89,9 +92,11 @@ global allocation. Measure perplexity/task quality and serialized bytes, includi
 - registered pinned-RAM ring buffers: correctness slice implemented with fixed aligned slots,
   move-only leases, whole-allocation registration, and fail-closed teardown; capacity/throughput
   tuning remains;
-- implement `io_uring + O_DIRECT` reads with bounded queue depth and cancellation;
+- CPU-only `io_uring + O_DIRECT` correctness adapter: ordinary reads target aligned `PacketRing`
+  slots under strict `STATX_DIOALIGN`, bounded queue depth, cooperative cancellation, and explicit
+  legacy buffered-only policy; fixed buffers, CUDA ownership composition, and throughput remain;
 - validate CRC after reads and preserve base-prefix fallback on late/corrupt optional packets
-  (implemented for the synchronous buffered `pread` oracle; repeat differentially for direct I/O).
+  (the synchronous buffered `pread` path remains the differential oracle for direct I/O).
 
 ### WP3 — CUDA execution (Linux)
 
@@ -151,8 +156,10 @@ cache hit rate, deadline misses, overlap, VRAM/RAM use, and quality. A “Pareto
 matched hardware, model, workload, and memory budget.
 
 Mac CPU/MPS results establish determinism and correctness only. The native Linux host now has
-bounded CUDA correctness plus NVMe/`io_uring` capability evidence; end-to-end runtime overlap,
-tail-latency, model throughput, quality, and Pareto gates remain untested.
+bounded CUDA correctness plus NVMe/`io_uring` capability evidence. The CPU direct-I/O adapter and
+measured-feedback trace contract do not by themselves establish fixed-buffer use, SSD-to-CUDA
+lifetime safety, runtime bandwidth, overlap, tail latency, model throughput, quality, or Pareto
+evidence.
 
 ## Principal risks and mitigations
 

@@ -291,6 +291,62 @@ stopped, the process terminates rather than recycle a slot or unregister/free it
 Likewise, teardown does not free an allocation after a failed `cudaHostUnregister`. A later faulted
 ring/quarantine mode may replace this fail-stop policy, but silent reuse is forbidden.
 
+## D-025 — The first io_uring/O_DIRECT backend is a strict CPU correctness adapter
+
+Status: accepted for the Linux CPU correctness slice.
+
+Open immutable pack files with `O_DIRECT` and admit direct reads only when `statx` reports non-zero
+`STATX_DIOALIGN` memory and offset alignment. Filesystem block size or page size may be retained as
+diagnostic fallback geometry, but it is not authoritative enough to submit an `O_DIRECT` request.
+Each admitted operation uses an ordinary `IORING_OP_READ` directly into an acquired, sufficiently
+aligned `PacketRing` filling slot. This slice does not register fixed io_uring buffers and does not
+borrow private storage from `CudaPacketRing`.
+
+Queue depth is a hard admission bound and ring backpressure remains distinct from optional-packet
+unavailability. Cancellation is cooperative: check it before submission and after completion, but
+do not recycle the slot until the original CQE proves the kernel no longer owns the destination.
+Short/error completions and CRC32C over logical bytes follow the buffered oracle's required-versus-
+optional policy. A valid legacy v1 terminal packet whose aligned physical extent crosses its
+unpadded EOF returns an explicit `buffered-only` result; the direct backend never performs a silent
+buffered fallback.
+
+`DirectPackFile` must not be live when the process calls `fork`, even with no read in flight;
+destroy it before `fork` and construct a new instance after `exec`. Mapping exclusions and PID
+guards are defense in depth, not fork support. Its first acceptance target is a deterministic
+functional differential against
+`PreadPackFile`, including cancellation, short/error completion, CRC, queue pressure, and legacy
+tail policy. This is not fixed-buffer evidence, a lifetime-safe CUDA bridge, asynchronous-overlap
+evidence, or an NVMe throughput claim.
+
+Operation IDs are monotonically unique only within one `DirectPackFile`; a future multi-pack
+runtime must identify an operation by both its source and ID (or introduce a process-wide allocator).
+The build gate compile-links the liburing APIs used by this adapter, while the runtime capability
+probe remains authoritative for the target filesystem and `IORING_OP_READ` support.
+
+## D-026 — Scheduler trace v2 carries deterministic measured-service feedback
+
+Status: accepted for the Python reference scheduler.
+
+The runtime supplies completed `ServiceObservation` records to the next scheduling event; the
+scheduler never samples a clock. Observations have strictly increasing sequence IDs and are kept in
+exact `(service_class, logical_bytes, physical_io_bytes)` buckets. The serialized policy parameters
+define a bounded rolling window, minimum sample count, and quantile; the default estimate is the
+nearest-rank p95 of the current exact bucket. An explicit per-request `transfer_us` remains the
+highest-precedence estimate, and a bucket below its minimum sample count uses the serialized
+bandwidth/fixed-latency model. Applying observations and scheduling the event is atomic: a failed
+required request rolls back cache, feedback samples, and sequence state so a retry cannot
+double-count or lose the observations.
+
+`critical_path_us`, measured from storage submission until the packet becomes device-ready, is the
+only observed service value used for scoring and deadline checks. Optional `io_service_us` and
+`h2d_service_us` are audit fields: they are not added together and do not imply an overlap ratio.
+Every request records the estimate and its source for replay, including a hypothetical reload
+estimate for a cache hit; only actually loaded packets contribute copy time or byte counters.
+
+Trace format v2 serializes feedback configuration, request service class, ordered observations, and
+the resulting transfer estimates. Trace v1 remains readable and exactly replayable under its old
+modeled/explicit-cost semantics, and v1 artifacts cannot silently acquire v2 feedback fields.
+
 ## Open decisions for Linux evidence
 
 - final tile aggregation and coalescing metadata;
@@ -298,5 +354,6 @@ ring/quarantine mode may replace this fail-stop policy, but silent reuse is forb
 - exact multi-prefix Hessian objective and compensation order;
 - GEMV/GEMM code layout and accumulation dtype;
 - queue depth, ring count, registered-buffer size, and cancellation policy;
-- deadline source and router-prediction model;
+- production service-class taxonomy, component-measurement endpoints, deadline source, and
+  router-prediction model;
 - production model checkpoint revisions, calibration corpus, and evaluation tasks.

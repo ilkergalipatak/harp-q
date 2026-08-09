@@ -45,6 +45,29 @@ if(UNIX)
     POSITION_INDEPENDENT_CODE ON
   )
   target_compile_options(harpq_packet_io PRIVATE -Wall -Wextra -Wpedantic)
+
+  if(HARPQ_HAS_IO_URING)
+    add_library(harpq_direct_packet_io STATIC
+      src/direct_packet_io_linux.cpp
+    )
+    add_library(HARPQ::direct_packet_io ALIAS harpq_direct_packet_io)
+    target_include_directories(harpq_direct_packet_io
+      PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>
+    )
+    target_compile_features(harpq_direct_packet_io PUBLIC cxx_std_17)
+    target_link_libraries(harpq_direct_packet_io
+      PUBLIC HARPQ::packet_io
+      PRIVATE HARPQ::liburing
+    )
+    target_compile_definitions(harpq_direct_packet_io PRIVATE _FILE_OFFSET_BITS=64)
+    set_target_properties(harpq_direct_packet_io PROPERTIES
+      CXX_EXTENSIONS OFF
+      POSITION_INDEPENDENT_CODE ON
+    )
+    target_compile_options(harpq_direct_packet_io PRIVATE -Wall -Wextra -Wpedantic)
+  endif()
 else()
   message(STATUS
     "HARP-Q packet I/O targets require POSIX pread and are disabled on this host")
@@ -68,6 +91,24 @@ if(BUILD_TESTING)
     target_compile_features(harpq_packet_io_test PRIVATE cxx_std_17)
     add_test(NAME native.packet_io COMMAND harpq_packet_io_test)
   endif()
+
+  if(HARPQ_HAS_IO_URING)
+    add_executable(harpq_direct_packet_io_test tests/direct_packet_io_test.cpp)
+    target_link_libraries(harpq_direct_packet_io_test
+      PRIVATE HARPQ::direct_packet_io)
+    target_compile_features(harpq_direct_packet_io_test PRIVATE cxx_std_17)
+    add_test(NAME native.direct_packet_io COMMAND harpq_direct_packet_io_test)
+    if(HARPQ_ENABLE_IO_URING STREQUAL "AUTO")
+      set_tests_properties(native.direct_packet_io PROPERTIES
+        SKIP_RETURN_CODE 77)
+    endif()
+  else()
+    add_executable(harpq_io_uring_unavailable tests/io_uring_unavailable.cpp)
+    target_compile_features(harpq_io_uring_unavailable PRIVATE cxx_std_17)
+    add_test(NAME native.direct_packet_io COMMAND harpq_io_uring_unavailable)
+    set_tests_properties(native.direct_packet_io PROPERTIES SKIP_RETURN_CODE 77)
+  endif()
+  set_tests_properties(native.direct_packet_io PROPERTIES TIMEOUT 30)
 endif()
 
 # CUDA is an optional peer of the dependency-free CPU oracle.  CPU-only builds

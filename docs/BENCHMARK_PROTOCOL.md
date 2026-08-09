@@ -31,6 +31,14 @@ batch size, prompt/decode lengths, cache budgets, warm-up count, and random seed
 4. Measure each progressive prefix and the fused multi-stage path against the NumPy reference.
 5. Measure copy/compute overlap on separate CUDA streams with events, not host wall-time alone.
 
+Before any runtime storage timing, the CPU direct reader must pass a functional differential
+against the buffered `pread` oracle for the same canonical packets and logical CRCs. Record
+`STATX_DIOALIGN`, actual offset/length/buffer alignment, queue depth, submission/completion counts,
+logical bytes, physical requested bytes, and file bytes returned. Ordinary `IORING_OP_READ` into a
+`PacketRing` slot is not io_uring fixed-buffer evidence. A legacy unpadded terminal tail is a
+buffered-only compatibility case and must be excluded from the `O_DIRECT` denominator rather than
+silently routed through buffered I/O.
+
 Acceptance gates from the project plan:
 
 - progressive 4-bit kernel throughput is at least 85% of the static W4 baseline;
@@ -44,6 +52,15 @@ Acceptance gates from the project plan:
 
 If a gate fails, report the value and reason; never silently relax the denominator or compare
 different shapes.
+
+For scheduler feedback, measure `critical_path_us` from storage submission until the packet is
+device-ready under the lifetime-safe SSD-to-CUDA path. Label every observation with its exact
+`service_class`, logical packet bytes, and physical I/O bytes; do not reuse a sample across another
+class or byte bucket. Record I/O and H2D component times when their clock domains and endpoints are
+well defined, but treat them as audit metadata only. Do not add the components or infer overlap
+from them: report overlap separately using the event timeline required above. Until the direct
+reader owns a safe bridge through CUDA completion and these endpoints are instrumented, it must not
+emit scheduler service observations as end-to-end runtime evidence.
 
 `harpq_gemv_benchmark` currently uses a benchmark-local naive static-W4 kernel with matched launch
 geometry. It is useful for regression and tuning direction only: its output explicitly sets

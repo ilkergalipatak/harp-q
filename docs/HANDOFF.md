@@ -1,7 +1,9 @@
 # HARP-Q handoff
 
-Last verified: 2026-08-09 on the original Apple-silicon Mac and the native Ubuntu 24.04 RTX 4090
-host. This file is the recovery source if the Codex task cannot be handed off directly.
+Last verified baseline: 2026-08-09 on the original Apple-silicon Mac and the native Ubuntu 24.04
+RTX 4090 host. Fourth-slice working-tree changes are explicitly marked pending below and are not
+covered by that baseline. This file is the recovery source if the Codex task cannot be handed off
+directly.
 
 ## Repository
 
@@ -36,7 +38,7 @@ Python remains the semantic and offline oracle:
   filesystem and fio provenance.
 - `cli.py`: `doctor`, `profile-host`, `demo`, `quantize`, `inspect`, `simulate`, and `replay`.
 
-The first three native correctness/performance-bring-up slices are implemented:
+The first three native correctness/performance-bring-up slices are validated:
 
 - `native/src/stage_codec.cpp`: dependency-free little-endian stage payload decoder, manual FP16
   conversion, signed-int2 prefix dequantization, CPU progressive-linear oracle, geometry checks,
@@ -68,8 +70,21 @@ The first three native correctness/performance-bring-up slices are implemented:
 - Root/native CMake: `HARPQ_ENABLE_CUDA=AUTO|ON|OFF`; explicit `ON` fails without CUDA, while a
   CPU-only test run records all five CUDA-only tests as explained CTest skips. CUDA architectures
   supplied through CMake or `CUDAARCHS` are preserved; otherwise the project defaults to `sm_89`.
-- CPU CI now runs the Python suite, CLI smoke, generated-fixture drift check, native CPU CTest, and
-  explicit CUDA skips on macOS and Ubuntu.
+- CPU CI runs the Python suite, CLI smoke, generated-fixture drift check, and native CPU CTest on
+  macOS and Ubuntu. The Linux job installs liburing and builds the direct-I/O adapter in `AUTO`
+  mode; macOS records a reasoned direct-I/O skip. Both jobs record explicit CUDA skips.
+
+The fourth slice is being integrated; its exact-source Linux results and source commit must be
+recorded before it is called validated:
+
+- `native/src/direct_packet_io_linux.cpp`: Linux CPU-only `io_uring + O_DIRECT` adapter using strict
+  `STATX_DIOALIGN`, bounded ordinary reads into `PacketRing` slots, cooperative cancellation,
+  logical CRC, and a distinct legacy `buffered-only` outcome. It has no fixed-buffer registration,
+  CUDA ownership bridge, fork support, or throughput claim.
+- `scheduler.py` trace v2: caller-supplied ordered `ServiceObservation` values, exact
+  `(service_class, logical_bytes, physical_io_bytes)` rolling-p95 buckets, auditable estimate
+  sources, and unchanged v1 replay. I/O/H2D component durations are audit-only; the observed
+  critical path drives deadlines.
 
 Architecture decisions are in `DECISIONS.md`; file/layout contracts are in `FORMAT.md`; benchmark
 gates are in `BENCHMARK_PROTOCOL.md`; the measured host summary is in `HOST_BASELINE.md`.
@@ -162,15 +177,31 @@ The bounded host profile verified `io_uring + O_DIRECT` on the selected ext4/NVM
 filesystem. The raw JSON reports remain ignored on that host. See `HOST_BASELINE.md` for the exact
 hardware and smoke measurements.
 
+The fourth-slice working tree still requires an exact-source Mac/Linux verification record here.
+The older counts and commit above apply only to the last validated source; they are not evidence for
+the new direct-I/O or measured-feedback paths.
+
+Before the final exception-lifetime and liburing configure-probe hardening, the fourth-slice tree
+passed 73 Python tests on Mac and Ubuntu, strict GCC 12 plus ASan/UBSan direct-I/O tests, four
+CPU/direct tests with five CUDA skips, and all nine CPU/CUDA tests on the RTX 4090. Subsequent
+hardening moves terminal-operation ownership before failure-message allocation, strengthens the
+configure-time API check, requires exact versioned trace schemas, and prevents generic `EINVAL`
+from becoming an AUTO-mode test skip. The final Mac worktree passes 74 Python tests, but its exact
+source was not rerun on Ubuntu because the remote Codex execution allowance was exhausted. Treat
+the preceding Linux results as near-source diagnostic evidence, not as an exact-source validation
+record; rerun the commands above or rely on a green CI run before promoting this slice to the
+validated baseline.
+
 ## Known limits — do not overclaim
 
 - The direct-decode CUDA path is batch-one GEMV only. It has no tensor-core/GEMM path and is not yet
   optimized against a production or library-parity static-W4 implementation. Its current naive-W4
   ratio is exploratory and cannot satisfy the ≥85% acceptance gate.
 - The cuBLAS path still materializes FP32 weights by design because it is the correctness oracle.
-- There is no native full-container/index reader, native scheduler, device cache, `io_uring`, or
-  `O_DIRECT` runtime backend yet. The implemented SSD-to-ring reference is synchronous buffered
-  `pread`; it proves semantics, not asynchronous storage overlap or NVMe throughput.
+- There is no native full-container/index reader, native scheduler, device cache, or lifetime-safe
+  io_uring-to-CUDA bridge yet. The Linux CPU direct adapter uses `io_uring + O_DIRECT`, but only as a
+  strict functional path against the synchronous buffered `pread` oracle; it proves neither
+  fixed-buffer use, asynchronous GPU overlap, nor NVMe throughput.
 - The CUDA ring registers its complete fixed allocation and has one copy stream plus per-slot
   events. It has no bounded registration-capacity probe, multi-ring concurrency policy, or measured
   runtime queue depth yet. Its catastrophic CUDA-safety policy is deliberately fail-stop rather
@@ -181,24 +212,31 @@ hardware and smoke measurements.
 - No PyTorch custom op, Mistral/Mixtral adapter, real checkpoint, or model-quality evaluation exists.
 - The host profiler's fio and H2D values are bounded capability denominators only. Runtime H2D,
   overlap, read amplification, TTFT, inter-token latency, and Pareto gates remain open.
+- Scheduler trace v2 can consume completed service observations, but no native runtime currently
+  emits the end-to-end storage-submission-to-device-ready measurement needed to populate them.
+- Direct-I/O operation IDs are monotonic only within one `DirectPackFile`; multi-pack tracing must
+  key them by source as well. Catastrophic submit ambiguity/`IORING_CQE_F_MORE` and the less-used
+  `Poll` terminal branches do not yet have the deterministic fault-injection coverage used by the
+  CUDA ring.
 - The encoder's fitting step is residual least-squares round-to-nearest, not yet a multi-prefix
   GPTQ-style optimizer.
 - Active KV cache remains in GPU/RAM and must not be paged to SSD in this prototype.
 
 ## Exact next implementation action
 
-Implement `io_uring + O_DIRECT` behind the now-tested packet-ring contract. Add a strict direct-safe
-extent check, `statx(STATX_DIOALIGN)` when available, `posix_memalign`-compatible registered slots,
-bounded queue depth, cancellation, short-completion handling, and an explicit buffered-only result
-for legacy unpadded terminal tails. Keep required-base failure fatal and optional-residual failure
-structured; never turn ring backpressure into residual fallback.
+Build an owning, lifetime-safe bridge from a completed `DirectPackFile` read into
+`CudaPacketRing`'s ready/H2D/in-flight lease chain. The bridge must keep the registered backing,
+io_uring operation, CUDA copy stream/event, and destination alive until both kernel I/O ownership
+and DMA completion are proven; it must not reach through either facade's private storage or make
+destruction order a caller convention. Preserve required/optional/backpressure/cancellation
+semantics and the fail-closed CUDA safety rule.
 
-Then connect io_uring completion to the existing H2D event lease, measure end-to-end storage bytes,
-logical resident bytes, pread/io_uring calls, H2D time, overlap, and deadline misses, and feed those
-service times into the scheduler/cache. Benchmark 64 KiB, 256 KiB, and 1 MiB first; the H2D curve
-favors coalescing, but final chunk size must also satisfy NVMe latency, read amplification, cache
-waste, and deadlines. Do not start Mistral/Mixtral integration until this path has differential
-tests against the synchronous `pread` oracle.
+Instrument that bridge from storage submission to device-ready completion and emit ordered
+`ServiceObservation` records with exact service class, logical bytes, physical bytes, and critical
+path. Keep I/O and H2D components audit-only, measure overlap separately, and compare 64 KiB,
+256 KiB, and 1 MiB runtime reads against size/queue-matched fio plus the registered-H2D denominator.
+Only after functional differential, lifetime/fault tests, and matched timing may these values feed
+the scheduler as runtime evidence. Do not begin Mistral/Mixtral integration yet.
 
 ## Recovery on either machine
 

@@ -14,6 +14,9 @@ from dataclasses import asdict, dataclass
 from typing import Any, Iterable, Mapping, Sequence
 
 
+_TRACE_FORMAT_VERSION = 2
+
+
 class SchedulerError(ValueError):
     """Base class for scheduler input or state failures."""
 
@@ -39,6 +42,9 @@ class SchedulerConfig:
     fixed_read_latency_us: float = 0.0
     min_residency_tokens: int = 8
     hysteresis: float = 0.15
+    feedback_window_size: int = 32
+    feedback_min_samples: int = 3
+    feedback_quantile: float = 0.95
 
     def __post_init__(self) -> None:
         if isinstance(self.capacity_bytes, bool) or not isinstance(self.capacity_bytes, int):
@@ -57,6 +63,29 @@ class SchedulerConfig:
             raise ValueError("min_residency_tokens must be a non-negative integer")
         if not math.isfinite(self.hysteresis) or self.hysteresis < 0:
             raise ValueError("hysteresis must be finite and non-negative")
+        if (
+            isinstance(self.feedback_window_size, bool)
+            or not isinstance(self.feedback_window_size, int)
+            or self.feedback_window_size <= 0
+        ):
+            raise ValueError("feedback_window_size must be a positive integer")
+        if (
+            isinstance(self.feedback_min_samples, bool)
+            or not isinstance(self.feedback_min_samples, int)
+            or self.feedback_min_samples <= 0
+            or self.feedback_min_samples > self.feedback_window_size
+        ):
+            raise ValueError(
+                "feedback_min_samples must be a positive integer no larger than "
+                "feedback_window_size"
+            )
+        if (
+            isinstance(self.feedback_quantile, bool)
+            or not math.isfinite(self.feedback_quantile)
+            or self.feedback_quantile <= 0
+            or self.feedback_quantile > 1
+        ):
+            raise ValueError("feedback_quantile must be finite and in (0, 1]")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -71,8 +100,10 @@ class PacketRequest:
     """A packet that may improve the current precision plan.
 
     ``deadline_us`` is relative to the start of this scheduling step.
-    ``transfer_us`` can carry a measured cost; when absent, the scheduler derives
-    it from packet size and :class:`SchedulerConfig`.
+    ``transfer_us`` can carry a measured cache-miss/reload cost; when absent, the scheduler
+    derives one from feedback or packet size and :class:`SchedulerConfig`. The hypothetical cost
+    still participates in priority and eviction scoring when this packet is already resident; it
+    is added to decision copy time only when a load actually occurs.
     """
 
     packet_id: str
@@ -86,6 +117,7 @@ class PacketRequest:
     io_bytes: int | None = None
     transfer_us: float | None = None
     required: bool = False
+    service_class: str = "default"
 
     def __post_init__(self) -> None:
         if not isinstance(self.packet_id, str) or not self.packet_id:
@@ -108,6 +140,8 @@ class PacketRequest:
             not math.isfinite(self.transfer_us) or self.transfer_us <= 0
         ):
             raise ValueError("transfer_us must be finite and positive when supplied")
+        if not isinstance(self.service_class, str) or not self.service_class:
+            raise ValueError("service_class must be a non-empty string")
         dependencies = tuple(self.dependencies)
         if any(not isinstance(item, str) or not item for item in dependencies):
             raise ValueError("dependencies must contain non-empty packet IDs")
@@ -129,8 +163,8 @@ class PacketRequest:
             return math.inf if self.distortion_gain * self.reuse * self.importance > 0 else 0.0
         return self.distortion_gain * self.reuse * self.importance / cost
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
+    def to_dict(self, *, format_version: int = _TRACE_FORMAT_VERSION) -> dict[str, Any]:
+        result = {
             "deadline_us": self.deadline_us,
             "dependencies": list(self.dependencies),
             "distortion_gain": self.distortion_gain,
@@ -143,12 +177,144 @@ class PacketRequest:
             "size_bytes": self.size_bytes,
             "transfer_us": self.transfer_us,
         }
+        if format_version >= 2:
+            result["service_class"] = self.service_class
+        return result
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "PacketRequest":
         data = dict(value)
         data["dependencies"] = tuple(data.get("dependencies", ()))
         return cls(**data)
+
+
+@dataclass(frozen=True, slots=True)
+class ServiceObservation:
+    """A completed transfer measurement supplied by the runtime.
+
+    The scheduler never reads a clock.  A caller measures a completed cache-miss path and supplies
+    the result at the next scheduling step. ``critical_path_us`` is the observed time from storage
+    submission until the packet became device-ready. The component times are audit metadata only:
+    they are not added together, so the reference scheduler does not invent an overlap ratio.
+    """
+
+    sequence_id: int
+    packet_id: str
+    logical_bytes: int
+    physical_io_bytes: int
+    critical_path_us: float
+    service_class: str = "default"
+    io_service_us: float | None = None
+    h2d_service_us: float | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.sequence_id, bool)
+            or not isinstance(self.sequence_id, int)
+            or self.sequence_id < 0
+        ):
+            raise ValueError("sequence_id must be a non-negative integer")
+        if not isinstance(self.packet_id, str) or not self.packet_id:
+            raise ValueError("packet_id must be a non-empty string")
+        if not isinstance(self.service_class, str) or not self.service_class:
+            raise ValueError("service_class must be a non-empty string")
+        if (
+            isinstance(self.logical_bytes, bool)
+            or not isinstance(self.logical_bytes, int)
+            or self.logical_bytes <= 0
+        ):
+            raise ValueError("logical_bytes must be a positive integer")
+        if (
+            isinstance(self.physical_io_bytes, bool)
+            or not isinstance(self.physical_io_bytes, int)
+            or self.physical_io_bytes < self.logical_bytes
+        ):
+            raise ValueError(
+                "physical_io_bytes must be an integer greater than or equal to logical_bytes"
+            )
+        if (
+            isinstance(self.critical_path_us, bool)
+            or not math.isfinite(self.critical_path_us)
+            or self.critical_path_us <= 0
+        ):
+            raise ValueError("critical_path_us must be finite and positive")
+        for name in ("io_service_us", "h2d_service_us"):
+            value = getattr(self, name)
+            if value is not None and (
+                isinstance(value, bool) or not math.isfinite(value) or value < 0
+            ):
+                raise ValueError(f"{name} must be finite and non-negative when supplied")
+            if value is not None and value > self.critical_path_us:
+                raise ValueError(f"{name} cannot exceed critical_path_us")
+
+    @property
+    def service_key(self) -> tuple[str, int, int]:
+        return (self.service_class, self.logical_bytes, self.physical_io_bytes)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "critical_path_us": self.critical_path_us,
+            "h2d_service_us": self.h2d_service_us,
+            "io_service_us": self.io_service_us,
+            "logical_bytes": self.logical_bytes,
+            "packet_id": self.packet_id,
+            "physical_io_bytes": self.physical_io_bytes,
+            "sequence_id": self.sequence_id,
+            "service_class": self.service_class,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "ServiceObservation":
+        return cls(**dict(value))
+
+
+@dataclass(frozen=True, slots=True)
+class TransferEstimate:
+    """Auditable cache-miss/reload estimate used for one request decision.
+
+    An estimate is recorded for every request because the policy uses hypothetical reload cost in
+    priority and eviction scoring. Its presence does not mean a transfer occurred: only packet IDs
+    in :attr:`SchedulerDecision.loaded` contribute to copy time and byte counters.
+    """
+
+    packet_id: str
+    transfer_us: float
+    source: str
+    sample_count: int = 0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.packet_id, str) or not self.packet_id:
+            raise ValueError("packet_id must be a non-empty string")
+        if (
+            isinstance(self.transfer_us, bool)
+            or not math.isfinite(self.transfer_us)
+            or self.transfer_us <= 0
+        ):
+            raise ValueError("transfer_us must be finite and positive")
+        if self.source not in {"request", "feedback", "config"}:
+            raise ValueError("source must be request, feedback, or config")
+        if (
+            isinstance(self.sample_count, bool)
+            or not isinstance(self.sample_count, int)
+            or self.sample_count < 0
+        ):
+            raise ValueError("sample_count must be a non-negative integer")
+        if self.source == "feedback" and self.sample_count == 0:
+            raise ValueError("feedback estimates require at least one sample")
+        if self.source != "feedback" and self.sample_count != 0:
+            raise ValueError("non-feedback estimates cannot report feedback samples")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "packet_id": self.packet_id,
+            "sample_count": self.sample_count,
+            "source": self.source,
+            "transfer_us": self.transfer_us,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "TransferEstimate":
+        return cls(**dict(value))
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,7 +369,12 @@ class CacheEntry:
 
 @dataclass(frozen=True, slots=True)
 class SchedulerDecision:
-    """One complete, deterministic scheduling outcome."""
+    """One complete, deterministic scheduling outcome.
+
+    ``transfer_estimates`` are hypothetical cache-miss/reload costs for policy scoring. Actual
+    transfers are identified by ``loaded`` and charged to ``copy_time_us``,
+    ``logical_load_bytes``, and ``io_load_bytes``.
+    """
 
     token_index: int
     selected: tuple[str, ...]
@@ -217,9 +388,10 @@ class SchedulerDecision:
     logical_load_bytes: int = 0
     io_load_bytes: int = 0
     read_amplification: float = 0.0
+    transfer_estimates: tuple[TransferEstimate, ...] = ()
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
+    def to_dict(self, *, format_version: int = _TRACE_FORMAT_VERSION) -> dict[str, Any]:
+        result = {
             "cache_bytes": self.cache_bytes,
             "cache_packet_ids": list(self.cache_packet_ids),
             "copy_time_us": self.copy_time_us,
@@ -233,6 +405,9 @@ class SchedulerDecision:
             "skipped": [[packet_id, reason] for packet_id, reason in self.skipped],
             "token_index": self.token_index,
         }
+        if format_version >= 2:
+            result["transfer_estimates"] = [item.to_dict() for item in self.transfer_estimates]
+        return result
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "SchedulerDecision":
@@ -249,6 +424,9 @@ class SchedulerDecision:
             logical_load_bytes=value.get("logical_load_bytes", 0),
             io_load_bytes=value.get("io_load_bytes", 0),
             read_amplification=value.get("read_amplification", 0.0),
+            transfer_estimates=tuple(
+                TransferEstimate.from_dict(item) for item in value.get("transfer_estimates", ())
+            ),
         )
 
 
@@ -258,14 +436,20 @@ class TraceEvent:
     now_us: float
     requests: tuple[PacketRequest, ...]
     decision: SchedulerDecision
+    observations: tuple[ServiceObservation, ...] = ()
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "decision": self.decision.to_dict(),
+    def to_dict(self, *, format_version: int = _TRACE_FORMAT_VERSION) -> dict[str, Any]:
+        result = {
+            "decision": self.decision.to_dict(format_version=format_version),
             "now_us": self.now_us,
-            "requests": [request.to_dict() for request in self.requests],
+            "requests": [
+                request.to_dict(format_version=format_version) for request in self.requests
+            ],
             "token_index": self.token_index,
         }
+        if format_version >= 2:
+            result["observations"] = [item.to_dict() for item in self.observations]
+        return result
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "TraceEvent":
@@ -274,6 +458,9 @@ class TraceEvent:
             now_us=value["now_us"],
             requests=tuple(PacketRequest.from_dict(item) for item in value["requests"]),
             decision=SchedulerDecision.from_dict(value["decision"]),
+            observations=tuple(
+                ServiceObservation.from_dict(item) for item in value.get("observations", ())
+            ),
         )
 
 
@@ -284,12 +471,34 @@ class SchedulerTrace:
     config: SchedulerConfig
     initial_cache: tuple[CacheEntry, ...]
     events: tuple[TraceEvent, ...]
-    format_version: int = 1
+    format_version: int = _TRACE_FORMAT_VERSION
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.format_version, bool)
+            or not isinstance(self.format_version, int)
+            or self.format_version not in {1, _TRACE_FORMAT_VERSION}
+        ):
+            raise SchedulerError("unsupported scheduler trace format")
+        if self.format_version == 1 and any(
+            event.observations
+            or event.decision.transfer_estimates
+            or any(request.service_class != "default" for request in event.requests)
+            for event in self.events
+        ):
+            raise SchedulerError("scheduler trace v1 cannot contain service feedback fields")
 
     def to_dict(self) -> dict[str, Any]:
+        config = self.config.to_dict()
+        if self.format_version == 1:
+            config.pop("feedback_window_size")
+            config.pop("feedback_min_samples")
+            config.pop("feedback_quantile")
         return {
-            "config": self.config.to_dict(),
-            "events": [event.to_dict() for event in self.events],
+            "config": config,
+            "events": [
+                event.to_dict(format_version=self.format_version) for event in self.events
+            ],
             "format": "harpq-scheduler-trace",
             "format_version": self.format_version,
             "initial_cache": [entry.to_dict() for entry in self.initial_cache],
@@ -302,13 +511,175 @@ class SchedulerTrace:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "SchedulerTrace":
-        if value.get("format") != "harpq-scheduler-trace" or value.get("format_version") != 1:
+        if not isinstance(value, Mapping):
+            raise SchedulerError("scheduler trace root must be an object")
+        version = value.get("format_version")
+        if (
+            value.get("format") != "harpq-scheduler-trace"
+            or isinstance(version, bool)
+            or not isinstance(version, int)
+            or version not in {1, _TRACE_FORMAT_VERSION}
+        ):
             raise SchedulerError("unsupported scheduler trace format")
+
+        def require_fields(
+            item: Any, expected: frozenset[str], label: str
+        ) -> Mapping[str, Any]:
+            if not isinstance(item, Mapping):
+                raise SchedulerError(f"{label} must be an object")
+            actual = frozenset(item)
+            if actual != expected:
+                missing = sorted(expected - actual)
+                unexpected = sorted(
+                    (actual - expected), key=lambda field: str(field)
+                )
+                details: list[str] = []
+                if missing:
+                    details.append(f"missing={missing!r}")
+                if unexpected:
+                    details.append(f"unexpected={unexpected!r}")
+                raise SchedulerError(
+                    f"{label} has invalid fields for trace v{version}: "
+                    + ", ".join(details)
+                )
+            return item
+
+        def require_array(item: Any, label: str) -> Sequence[Any]:
+            if (
+                not isinstance(item, Sequence)
+                or isinstance(item, (str, bytes, bytearray))
+            ):
+                raise SchedulerError(f"{label} must be an array")
+            return item
+
+        root_fields = frozenset(
+            {"config", "events", "format", "format_version", "initial_cache"}
+        )
+        config_fields = frozenset(
+            {
+                "bandwidth_bytes_per_us",
+                "capacity_bytes",
+                "fixed_read_latency_us",
+                "hysteresis",
+                "min_residency_tokens",
+            }
+        )
+        request_fields = frozenset(
+            {
+                "deadline_us",
+                "dependencies",
+                "distortion_gain",
+                "importance",
+                "io_bytes",
+                "kernel_cost_us",
+                "packet_id",
+                "required",
+                "reuse",
+                "size_bytes",
+                "transfer_us",
+            }
+        )
+        decision_fields = frozenset(
+            {
+                "cache_bytes",
+                "cache_packet_ids",
+                "copy_time_us",
+                "evicted",
+                "io_load_bytes",
+                "loaded",
+                "logical_load_bytes",
+                "read_amplification",
+                "scores",
+                "selected",
+                "skipped",
+                "token_index",
+            }
+        )
+        event_fields = frozenset({"decision", "now_us", "requests", "token_index"})
+        if version >= 2:
+            config_fields |= frozenset(
+                {"feedback_min_samples", "feedback_quantile", "feedback_window_size"}
+            )
+            request_fields |= frozenset({"service_class"})
+            decision_fields |= frozenset({"transfer_estimates"})
+            event_fields |= frozenset({"observations"})
+
+        require_fields(value, root_fields, "scheduler trace")
+        config_value = require_fields(value["config"], config_fields, "scheduler config")
+        initial_cache_value = require_array(value["initial_cache"], "initial_cache")
+        cache_fields = frozenset(
+            {
+                "dependencies",
+                "last_access_token",
+                "loaded_token",
+                "packet_id",
+                "score",
+                "size_bytes",
+            }
+        )
+        for index, item in enumerate(initial_cache_value):
+            require_fields(item, cache_fields, f"initial_cache[{index}]")
+
+        events_value = require_array(value["events"], "events")
+        observation_fields = frozenset(
+            {
+                "critical_path_us",
+                "h2d_service_us",
+                "io_service_us",
+                "logical_bytes",
+                "packet_id",
+                "physical_io_bytes",
+                "sequence_id",
+                "service_class",
+            }
+        )
+        estimate_fields = frozenset(
+            {"packet_id", "sample_count", "source", "transfer_us"}
+        )
+        for event_index, event_item in enumerate(events_value):
+            event = require_fields(
+                event_item, event_fields, f"events[{event_index}]"
+            )
+            requests = require_array(
+                event["requests"], f"events[{event_index}].requests"
+            )
+            for request_index, request_item in enumerate(requests):
+                require_fields(
+                    request_item,
+                    request_fields,
+                    f"events[{event_index}].requests[{request_index}]",
+                )
+            decision = require_fields(
+                event["decision"],
+                decision_fields,
+                f"events[{event_index}].decision",
+            )
+            if version >= 2:
+                observations = require_array(
+                    event["observations"], f"events[{event_index}].observations"
+                )
+                for observation_index, observation_item in enumerate(observations):
+                    require_fields(
+                        observation_item,
+                        observation_fields,
+                        f"events[{event_index}].observations[{observation_index}]",
+                    )
+                estimates = require_array(
+                    decision["transfer_estimates"],
+                    f"events[{event_index}].decision.transfer_estimates",
+                )
+                for estimate_index, estimate_item in enumerate(estimates):
+                    require_fields(
+                        estimate_item,
+                        estimate_fields,
+                        "events["
+                        f"{event_index}].decision.transfer_estimates[{estimate_index}]",
+                    )
         return cls(
-            config=SchedulerConfig.from_dict(value["config"]),
-            initial_cache=tuple(CacheEntry.from_dict(item) for item in value["initial_cache"]),
-            events=tuple(TraceEvent.from_dict(item) for item in value["events"]),
-            format_version=1,
+            config=SchedulerConfig.from_dict(config_value),
+            initial_cache=tuple(CacheEntry.from_dict(item) for item in initial_cache_value),
+            events=tuple(TraceEvent.from_dict(item) for item in events_value),
+            format_version=version,
         )
 
     @classmethod
@@ -331,7 +702,10 @@ class CacheDeadlineScheduler:
         *,
         initial_cache: Iterable[CacheEntry] = (),
         record_trace: bool = True,
+        _trace_format_version: int = _TRACE_FORMAT_VERSION,
     ) -> None:
+        if _trace_format_version not in {1, _TRACE_FORMAT_VERSION}:
+            raise SchedulerError("unsupported scheduler trace format")
         self.config = config
         entries = tuple(sorted(initial_cache, key=lambda entry: entry.packet_id))
         self._validate_initial_cache(entries)
@@ -340,6 +714,9 @@ class CacheDeadlineScheduler:
         self._events: list[TraceEvent] = []
         self._record_trace = record_trace
         self._last_token: int | None = None
+        self._trace_format_version = _trace_format_version
+        self._feedback_samples: dict[tuple[str, int, int], list[float]] = {}
+        self._last_observation_sequence: int | None = None
 
     def _validate_initial_cache(self, entries: Sequence[CacheEntry]) -> None:
         by_id = {entry.packet_id: entry for entry in entries}
@@ -369,6 +746,7 @@ class CacheDeadlineScheduler:
             config=self.config,
             initial_cache=self._initial_cache,
             events=tuple(self._events),
+            format_version=self._trace_format_version,
         )
 
     def export_trace(self) -> SchedulerTrace:
@@ -382,8 +760,14 @@ class CacheDeadlineScheduler:
         requests: Iterable[PacketRequest],
         *,
         now_us: float = 0.0,
+        observations: Iterable[ServiceObservation] = (),
     ) -> SchedulerDecision:
-        """Schedule one epoch and atomically update the refinement cache."""
+        """Schedule one epoch and atomically update cache and feedback state.
+
+        Observations must have been measured before this call. They update a deterministic service
+        model before the current requests are scored; this function does not sample wall-clock
+        time. A failed required request rolls the observations back so a retry can resubmit them.
+        """
 
         if isinstance(token_index, bool) or not isinstance(token_index, int) or token_index < 0:
             raise ValueError("token_index must be a non-negative integer")
@@ -392,14 +776,24 @@ class CacheDeadlineScheduler:
         if not math.isfinite(now_us) or now_us < 0:
             raise ValueError("now_us must be finite and non-negative")
         request_tuple = tuple(sorted(requests, key=lambda request: request.packet_id))
+        observation_tuple = tuple(observations)
+        if self._trace_format_version == 1 and observation_tuple:
+            raise SchedulerError("scheduler trace v1 cannot record service observations")
         request_map = self._validate_requests(request_tuple)
         snapshot = dict(self._cache)
+        feedback_snapshot = {
+            key: list(samples) for key, samples in self._feedback_samples.items()
+        }
         last_token = self._last_token
+        last_observation_sequence = self._last_observation_sequence
         try:
+            self._apply_observations(observation_tuple)
             decision = self._schedule_impl(token_index, request_tuple, request_map)
         except Exception:
             self._cache = snapshot
+            self._feedback_samples = feedback_snapshot
             self._last_token = last_token
+            self._last_observation_sequence = last_observation_sequence
             raise
         self._last_token = token_index
         if self._record_trace:
@@ -409,9 +803,50 @@ class CacheDeadlineScheduler:
                     now_us=now_us,
                     requests=request_tuple,
                     decision=decision,
+                    observations=observation_tuple,
                 )
             )
         return decision
+
+    def _apply_observations(self, observations: Sequence[ServiceObservation]) -> None:
+        last_sequence = self._last_observation_sequence
+        for observation in observations:
+            if not isinstance(observation, ServiceObservation):
+                raise TypeError("observations must contain ServiceObservation instances")
+            if last_sequence is not None and observation.sequence_id <= last_sequence:
+                raise SchedulerError("service observation sequence IDs must increase strictly")
+            samples = self._feedback_samples.setdefault(observation.service_key, [])
+            samples.append(observation.critical_path_us)
+            if len(samples) > self.config.feedback_window_size:
+                del samples[: len(samples) - self.config.feedback_window_size]
+            last_sequence = observation.sequence_id
+        self._last_observation_sequence = last_sequence
+
+    def _estimate_transfer(self, request: PacketRequest) -> TransferEstimate:
+        if request.transfer_us is not None:
+            return TransferEstimate(
+                packet_id=request.packet_id,
+                transfer_us=request.transfer_us,
+                source="request",
+            )
+        physical_io_bytes = request.io_bytes if request.io_bytes is not None else request.size_bytes
+        samples = self._feedback_samples.get(
+            (request.service_class, request.size_bytes, physical_io_bytes), ()
+        )
+        if len(samples) >= self.config.feedback_min_samples:
+            ordered = sorted(samples)
+            rank = math.ceil(self.config.feedback_quantile * len(ordered)) - 1
+            return TransferEstimate(
+                packet_id=request.packet_id,
+                transfer_us=ordered[rank],
+                source="feedback",
+                sample_count=len(ordered),
+            )
+        return TransferEstimate(
+            packet_id=request.packet_id,
+            transfer_us=request.transfer_duration_us(self.config),
+            source="config",
+        )
 
     def _validate_requests(
         self, requests: Sequence[PacketRequest]
@@ -447,8 +882,14 @@ class CacheDeadlineScheduler:
         requests: Sequence[PacketRequest],
         request_map: Mapping[str, PacketRequest],
     ) -> SchedulerDecision:
+        estimates = {
+            request.packet_id: self._estimate_transfer(request) for request in requests
+        }
         scores = {
-            request.packet_id: request.priority_score(self.config) for request in requests
+            request.packet_id: self._priority_score(
+                request, estimates[request.packet_id].transfer_us
+            )
+            for request in requests
         }
         order = sorted(
             requests,
@@ -479,7 +920,7 @@ class CacheDeadlineScheduler:
             missed_deadline = False
             for packet_id in missing:
                 request = request_map[packet_id]
-                finish += request.transfer_duration_us(self.config)
+                finish += estimates[packet_id].transfer_us
                 if finish > request.deadline_us:
                     missed_deadline = True
                     break
@@ -516,7 +957,7 @@ class CacheDeadlineScheduler:
                     evicted.append(victim_id)
             for packet_id in missing:
                 request = request_map[packet_id]
-                copy_time_us += request.transfer_duration_us(self.config)
+                copy_time_us += estimates[packet_id].transfer_us
                 logical_load_bytes += request.size_bytes
                 io_load_bytes += (
                     request.io_bytes if request.io_bytes is not None else request.size_bytes
@@ -552,7 +993,20 @@ class CacheDeadlineScheduler:
             read_amplification=(
                 io_load_bytes / logical_load_bytes if logical_load_bytes else 0.0
             ),
+            transfer_estimates=(
+                tuple(estimates[packet_id] for packet_id in sorted(estimates))
+                if self._trace_format_version >= 2
+                else ()
+            ),
         )
+
+    @staticmethod
+    def _priority_score(request: PacketRequest, transfer_us: float) -> float:
+        cost = transfer_us + request.kernel_cost_us
+        benefit = request.distortion_gain * request.reuse * request.importance
+        if cost == 0:
+            return math.inf if benefit > 0 else 0.0
+        return benefit / cost
 
     def _dependency_closure(
         self, packet_id: str, request_map: Mapping[str, PacketRequest]
@@ -672,12 +1126,18 @@ class CacheDeadlineScheduler:
     def from_trace(cls, trace: SchedulerTrace, *, verify: bool = True) -> "CacheDeadlineScheduler":
         """Replay *trace* and return the reconstructed scheduler state."""
 
-        scheduler = cls(trace.config, initial_cache=trace.initial_cache, record_trace=True)
+        scheduler = cls(
+            trace.config,
+            initial_cache=trace.initial_cache,
+            record_trace=True,
+            _trace_format_version=trace.format_version,
+        )
         for index, event in enumerate(trace.events):
             decision = scheduler.schedule(
                 event.token_index,
                 event.requests,
                 now_us=event.now_us,
+                observations=event.observations,
             )
             if verify and decision != event.decision:
                 raise ReplayMismatchError(
@@ -717,7 +1177,11 @@ def replay_trace(
 ) -> tuple[SchedulerDecision, ...]:
     """Replay a trace and return its regenerated decisions."""
 
-    parsed = SchedulerTrace.from_json(trace) if isinstance(trace, (str, bytes, bytearray)) else trace
+    parsed = (
+        SchedulerTrace.from_json(trace)
+        if isinstance(trace, (str, bytes, bytearray))
+        else trace
+    )
     scheduler = CacheDeadlineScheduler.from_trace(parsed, verify=verify)
     return tuple(event.decision for event in scheduler.trace.events)
 
@@ -732,7 +1196,9 @@ __all__ = [
     "SchedulerDependencyError",
     "SchedulerError",
     "SchedulerTrace",
+    "ServiceObservation",
     "TraceEvent",
+    "TransferEstimate",
     "UnschedulableRequestError",
     "replay_trace",
 ]

@@ -27,6 +27,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("registered pread-to-H2D ring", report["nvidia_performance_tests_reason"])
         self.assertIn("static-W4", report["nvidia_performance_tests_reason"])
         self.assertIn("io_uring/O_DIRECT", report["nvidia_performance_tests_reason"])
+        self.assertIn("direct-I/O-to-CUDA bridge", report["nvidia_performance_tests_reason"])
 
     def test_demo_writes_functional_summary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
