@@ -27,6 +27,51 @@ set_target_properties(harpq_cuda_oracle PROPERTIES
   POSITION_INDEPENDENT_CODE ON
 )
 
+add_library(harpq_progressive_gemv STATIC
+  ../src/progressive_gemv.cu
+)
+add_library(HARPQ::progressive_gemv ALIAS harpq_progressive_gemv)
+target_include_directories(harpq_progressive_gemv
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include>
+    $<INSTALL_INTERFACE:include>
+)
+target_compile_features(harpq_progressive_gemv PUBLIC cxx_std_17 cuda_std_17)
+target_link_libraries(harpq_progressive_gemv
+  PUBLIC
+    HARPQ::native
+    CUDA::cudart
+)
+set_target_properties(harpq_progressive_gemv PROPERTIES
+  CXX_EXTENSIONS OFF
+  CUDA_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE ON
+)
+
+add_executable(harpq_h2d_benchmark
+  ../benchmarks/h2d_benchmark.cu
+)
+target_compile_features(harpq_h2d_benchmark PRIVATE cxx_std_17 cuda_std_17)
+target_link_libraries(harpq_h2d_benchmark PRIVATE CUDA::cudart)
+set_target_properties(harpq_h2d_benchmark PROPERTIES
+  CXX_EXTENSIONS OFF
+  CUDA_EXTENSIONS OFF
+)
+
+add_executable(harpq_gemv_benchmark
+  ../benchmarks/gemv_benchmark.cu
+)
+target_compile_features(harpq_gemv_benchmark PRIVATE cxx_std_17 cuda_std_17)
+target_link_libraries(harpq_gemv_benchmark
+  PRIVATE
+    HARPQ::progressive_gemv
+    CUDA::cudart
+)
+set_target_properties(harpq_gemv_benchmark PROPERTIES
+  CXX_EXTENSIONS OFF
+  CUDA_EXTENSIONS OFF
+)
+
 if(BUILD_TESTING)
   add_executable(harpq_cuda_oracle_test
     ../tests/cuda_oracle_test.cu
@@ -42,7 +87,58 @@ if(BUILD_TESTING)
     CUDA_EXTENSIONS OFF
   )
   add_test(NAME native.cuda_oracle COMMAND harpq_cuda_oracle_test)
+
+  add_executable(harpq_progressive_gemv_test
+    ../tests/progressive_gemv_test.cu
+  )
+  target_include_directories(harpq_progressive_gemv_test
+    PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/../tests
+  )
+  target_compile_features(
+    harpq_progressive_gemv_test PRIVATE cxx_std_17 cuda_std_17)
+  target_link_libraries(harpq_progressive_gemv_test
+    PRIVATE
+      HARPQ::progressive_gemv
+      HARPQ::cuda_oracle
+  )
+  set_target_properties(harpq_progressive_gemv_test PROPERTIES
+    CXX_EXTENSIONS OFF
+    CUDA_EXTENSIONS OFF
+  )
+  add_test(NAME native.progressive_gemv COMMAND harpq_progressive_gemv_test)
+
+  add_test(
+    NAME native.h2d_smoke
+    COMMAND harpq_h2d_benchmark
+      --bytes 1048576
+      --warmup 2
+      --iterations 5
+      --json
+  )
+  set_tests_properties(native.h2d_smoke PROPERTIES TIMEOUT 30)
+
+  add_test(
+    NAME native.gemv_benchmark_smoke
+    COMMAND harpq_gemv_benchmark
+      --rows 257
+      --columns 513
+      --tile 128
+      --group 128
+      --prefix 2
+      --warmup 1
+      --iterations 5
+      --repeats 3
+      --json
+  )
+  set_tests_properties(native.gemv_benchmark_smoke PROPERTIES TIMEOUT 30)
+
   if(HARPQ_ENABLE_CUDA STREQUAL "AUTO")
-    set_tests_properties(native.cuda_oracle PROPERTIES SKIP_RETURN_CODE 77)
+    set_tests_properties(
+      native.cuda_oracle
+      native.progressive_gemv
+      native.h2d_smoke
+      native.gemv_benchmark_smoke
+      PROPERTIES SKIP_RETURN_CODE 77)
   endif()
 endif()

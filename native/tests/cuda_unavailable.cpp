@@ -2,7 +2,7 @@
 
 int main() {
   std::cout
-      << "SKIP: CUDA oracle was not built; configure with "
+      << "SKIP: CUDA targets were not built; configure with "
          "-DHARPQ_ENABLE_CUDA=ON on an NVIDIA/CUDA host\n";
   return 77;
 }

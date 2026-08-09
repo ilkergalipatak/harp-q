@@ -185,6 +185,51 @@ Fused kernels that use FP16/BF16 output, tensor-core accumulation, or a differen
 must receive a separate documented tolerance before performance tuning. Do not relax a tolerance
 after observing a failing benchmark without recording a new decision and justification.
 
+## D-019 — The first fused decode kernel is a device-view GEMV
+
+Status: accepted for the correctness-first CUDA slice.
+
+For batch-one decode, expose an asynchronous CUDA launch that consumes device-resident signed-int2
+code arrays and raw FP16 scale bits for a contiguous prefix of up to four stages. Accumulate input,
+decoded residual weights, and output in FP32; add bias exactly once. Do not materialize an FP32
+weight matrix and do not expose Python objects at the kernel boundary. The caller owns device
+buffer lifetime, stream ordering, and completion; a separate owning host wrapper exists only for
+differential tests and bring-up.
+
+Because the fused block reduction and FMA order differ from the scalar/SGEMM oracle, require each
+finite FP32 output to satisfy
+`abs(actual - expected) <= 2e-4 + 2e-4 * abs(expected)` at prefixes zero through four. This
+tolerance was fixed before throughput tuning. It does not apply to a future FP16/BF16 output path.
+
+## D-020 — Pinned-H2D baseline uses future-ring-compatible memory
+
+Status: accepted.
+
+Measure the isolated H2D denominator with ordinary page-aligned host memory registered through
+`cudaHostRegister`, not a pageable fallback and not `cudaHostAlloc`. This mirrors the ownership and
+alignment strategy intended for the future `O_DIRECT`/`io_uring` ring. Use a nonblocking CUDA
+stream, CUDA events around timed H2D copies only, bounded warm-up/iteration volumes, and a sampled
+D2H checksum after the run. Registration failure is explicit.
+
+Treat this tool as a link-level microbenchmark, never as model throughput. Runtime H2D acceptance
+remains at least 80% of a size-matched run captured with the same device, driver/runtime, payload,
+registration strategy, and background-load conditions.
+
+## D-021 — The first static-W4 comparison is exploratory and oracle-checked
+
+Status: accepted for kernel bring-up, not for the throughput acceptance gate.
+
+The first fused-GEMV timing tool compares against a benchmark-local signed-int4 kernel with the
+same output-row mapping and block-reduction geometry. Before reporting any ratio, validate that
+static kernel element by element against a deterministic CPU implementation of its packing, scale
+indexing, FMA lanes, warp tree, and block tree. The FP32 validation bound is fixed at
+`abs(actual - expected) <= 2e-5 + 2e-6 * abs(expected)`.
+
+Always label this denominator `exploratory_matched_naive_baseline` and emit
+`acceptance_evidence=false`. It is a regression and tuning aid only; the project's 85% gate still
+requires an optimized production or library-parity static-W4 implementation under matched shape,
+warm-up, clocks, and measurement settings.
+
 ## Open decisions for Linux evidence
 
 - final tile aggregation and coalescing metadata;

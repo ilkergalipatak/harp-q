@@ -98,8 +98,10 @@ global allocation. Measure perplexity/task quality and serialized bytes, includi
 - add PyTorch C++/CUDA custom op and stream/event DAG;
 - compare each prefix against NumPy and measure static W4, H2D, and overlap gates.
 
-Arithmetic tolerances must be defined by output dtype and accumulation order before performance
-tuning.
+Arithmetic tolerances are fixed before performance tuning: the FP32 materialize-plus-cuBLAS oracle
+uses `atol=rtol=1e-4`, while the FP32 direct-decode block-reduction GEMV uses
+`atol=rtol=2e-4`. Any lower-precision or differently accumulated path requires a new declared
+contract.
 
 ### WP4 — dense integration (Linux)
 

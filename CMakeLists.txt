@@ -10,15 +10,36 @@ if(NOT HARPQ_ENABLE_CUDA MATCHES "^(AUTO|ON|OFF)$")
 endif()
 
 set(HARPQ_HAS_CUDA OFF)
+set(HARPQ_CUDA_ARCHITECTURES_USER_DEFINED OFF)
+if(DEFINED CMAKE_CUDA_ARCHITECTURES OR
+   (DEFINED ENV{CUDAARCHS} AND NOT "$ENV{CUDAARCHS}" STREQUAL ""))
+  set(HARPQ_CUDA_ARCHITECTURES_USER_DEFINED ON)
+endif()
 if(NOT HARPQ_ENABLE_CUDA STREQUAL "OFF")
   include(CheckLanguage)
   check_language(CUDA)
   if(CMAKE_CUDA_COMPILER)
-    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-      set(CMAKE_CUDA_ARCHITECTURES 89 CACHE STRING "CUDA architectures for HARP-Q")
-    endif()
     enable_language(CUDA)
-    set(HARPQ_HAS_CUDA ON)
+    if(CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 11.8)
+      if(HARPQ_ENABLE_CUDA STREQUAL "ON")
+        message(FATAL_ERROR
+          "HARPQ_ENABLE_CUDA=ON requires CUDA toolkit 11.8 or newer; "
+          "found ${CMAKE_CUDA_COMPILER_VERSION}")
+      else()
+        message(STATUS
+          "CUDA toolkit ${CMAKE_CUDA_COMPILER_VERSION} is older than 11.8; "
+          "continuing with CPU targets and explicit CUDA test skips")
+      endif()
+    else()
+      if(NOT HARPQ_CUDA_ARCHITECTURES_USER_DEFINED)
+        # enable_language(CUDA) seeds a compiler default in the cache. Replace
+        # only that implicit value; never override an architecture supplied by
+        # the caller.
+        set(CMAKE_CUDA_ARCHITECTURES 89 CACHE STRING
+          "CUDA architectures for HARP-Q" FORCE)
+      endif()
+      set(HARPQ_HAS_CUDA ON)
+    endif()
   elseif(HARPQ_ENABLE_CUDA STREQUAL "ON")
     message(FATAL_ERROR "HARPQ_ENABLE_CUDA=ON, but no CUDA compiler was found")
   endif()

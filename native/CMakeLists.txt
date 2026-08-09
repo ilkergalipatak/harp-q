@@ -36,6 +36,12 @@ if(HARPQ_HAS_CUDA)
 elseif(BUILD_TESTING)
   add_executable(harpq_cuda_unavailable tests/cuda_unavailable.cpp)
   target_compile_features(harpq_cuda_unavailable PRIVATE cxx_std_17)
-  add_test(NAME native.cuda_oracle COMMAND harpq_cuda_unavailable)
-  set_tests_properties(native.cuda_oracle PROPERTIES SKIP_RETURN_CODE 77)
+  foreach(cuda_test IN ITEMS
+      native.cuda_oracle
+      native.progressive_gemv
+      native.h2d_smoke
+      native.gemv_benchmark_smoke)
+    add_test(NAME ${cuda_test} COMMAND harpq_cuda_unavailable)
+    set_tests_properties(${cuda_test} PROPERTIES SKIP_RETURN_CODE 77)
+  endforeach()
 endif()

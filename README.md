@@ -8,8 +8,9 @@ katmanları ekler.
 
 NumPy uygulaması formatın ve sayısal davranışın taşınabilir referansıdır. C++17 katmanı aynı stage
 payload'larını bağımsız olarak decode eder; CUDA doğruluk oracle'ı seçilen residual prefix'i GPU'da
-açıp cuBLAS ile hesaplar. Mac sonuçları yalnızca fonksiyonel doğruluk içindir. Fused kernel, gerçek
-async NVMe I/O ve NVIDIA performans ölçümleri native Linux aşamasına aittir.
+açıp cuBLAS ile hesaplar. İlk batch-one fused GEMV ise FP32 ağırlık oluşturmadan device-resident
+int2 code ve FP16 scale verisini doğrudan tüketir. Mac sonuçları yalnızca fonksiyonel doğruluk
+içindir. Gerçek async NVMe I/O ve NVIDIA performans kabul ölçümleri native Linux aşamasına aittir.
 
 ## Hızlı başlangıç
 
@@ -85,8 +86,27 @@ ctest --test-dir build/native-cuda --output-on-failure
 
 `HARPQ_ENABLE_CUDA=ON` toolkit bulunamazsa configure aşamasında, çalışan GPU görünmezse test
 aşamasında hata verir. `AUTO` toolkit'i keşfeder; `OFF` CPU testini ve gerekçeli CUDA skip kaydını
-çalıştırır. CUDA oracle doğruluk içindir: ağırlığı FP32 olarak materialize ettiği için fused kernel
-throughput sonucu olarak kullanılamaz.
+çalıştırır. CUDA CTest; materialize-plus-cuBLAS oracle'ını, doğrudan-decode fused GEMV'i ve küçük
+pinned-H2D smoke testini ayrı ayrı gösterir.
+
+Gelecekteki `O_DIRECT` ring ile aynı bellek sahipliği modelini kullanan izole H2D denominator'ı:
+
+```sh
+build/native-cuda/native/cuda/harpq_h2d_benchmark --json
+```
+
+Batch-one doğrudan-decode kernelini aynı launch geometrisine sahip dahili, naive bir static-W4
+kernel ile keşif amaçlı karşılaştırmak için:
+
+```sh
+build/native-cuda/native/cuda/harpq_gemv_benchmark --json
+```
+
+Araç sistem sayfasına hizalı sıradan belleği `cudaHostRegister` ile pinler (ölçülen Ubuntu hostunda
+sayfa boyutu 4096 byte), kopyayı CUDA event'leriyle ölçer ve örnek D2H checksum doğrulaması yapar.
+H2D çıktısı model throughput iddiası değildir; GEMV karşılaştırmasındaki dahili static-W4 kernel de
+üretim/library-parity baseline değildir. Fused GEMV henüz optimize edilmiş static-W4 baseline'a
+karşı kabul kapısını geçmiş sayılmaz.
 
 ## Tasarım sınırı
 

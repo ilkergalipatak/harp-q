@@ -108,5 +108,7 @@ The CPU reference operation accumulates `X @ residual_stage.T` independently. Se
 materialized FP32 prefix weights must match exactly. For the current FP32 CUDA cuBLAS oracle, every
 finite output element must satisfy
 `abs(actual - expected) <= 1e-4 + 1e-4 * abs(expected)` for every prefix. A fused kernel may change
-arithmetic ordering or output dtype only after a separate tolerance is recorded before tuning; see
-D-018 in `DECISIONS.md`.
+arithmetic ordering or output dtype only after a separate tolerance is recorded before tuning. The
+first FP32 fused GEMV uses
+`abs(actual - expected) <= 2e-4 + 2e-4 * abs(expected)` because it performs a block reduction and
+FMA accumulation directly from int2/FP16 stage views; see D-018 and D-019 in `DECISIONS.md`.

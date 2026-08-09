@@ -24,7 +24,7 @@ batch size, prompt/decode lengths, cache budgets, warm-up count, and random seed
 
 ## Microbenchmarks and gates
 
-1. Measure pinned-host H2D with CUDA `bandwidthTest` or the later HARP-Q copy benchmark.
+1. Measure pinned-host H2D with `harpq_h2d_benchmark` at the runtime's actual transfer size.
 2. Measure target-filesystem sequential direct I/O with fio using the same block sizes and queue
    depth as the runtime.
 3. Measure static W4 GEMV/GEMM baselines with identical shapes, batches, clocks, and warm-up.
@@ -39,10 +39,18 @@ Acceptance gates from the project plan:
 - read amplification, physical bytes divided by useful packet bytes, is at most 1.2;
 - every FP32 CUDA-oracle prefix satisfies
   `abs(actual - expected) <= 1e-4 + 1e-4 * abs(expected)` for each finite element. A lower-precision
-  fused path requires its own predeclared dtype/order-specific tolerance.
+  path requires its own predeclared dtype/order-specific tolerance. The FP32 fused progressive GEMV
+  uses the separately declared `2e-4 + 2e-4 * abs(expected)` bound.
 
 If a gate fails, report the value and reason; never silently relax the denominator or compare
 different shapes.
+
+`harpq_gemv_benchmark` currently uses a benchmark-local naive static-W4 kernel with matched launch
+geometry. It is useful for regression and tuning direction only: its output explicitly sets
+`acceptance_evidence=false`, and it cannot satisfy the 85% gate until an optimized production or
+library-parity W4 denominator is selected and documented. Before emitting a timing ratio, that
+naive kernel must pass its CPU reduction-tree oracle at
+`abs(actual - expected) <= 2e-5 + 2e-6 * abs(expected)`; see D-021.
 
 ## End-to-end model protocol
 

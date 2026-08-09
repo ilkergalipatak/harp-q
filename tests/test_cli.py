@@ -21,7 +21,10 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertTrue(report["reference_tests_supported"])
         self.assertFalse(report["nvidia_performance_tests_supported"])
-        self.assertIn("fused CUDA kernels", report["nvidia_performance_tests_reason"])
+        self.assertIn(
+            "correctness-first fused GEMV", report["nvidia_performance_tests_reason"]
+        )
+        self.assertIn("static-W4", report["nvidia_performance_tests_reason"])
 
     def test_demo_writes_functional_summary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
