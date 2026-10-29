@@ -123,6 +123,17 @@ PYTHONPATH=src python scripts/check_native_feedback.py build/native-service-obse
 yolda paket başına `cudaMalloc` maliyetini içerir. Bu kayıtlar format/replay doğrulamasıdır;
 kalibre edilmiş production scheduler maliyeti veya bant genişliği kabul sonucu değildir.
 
+Tekrarlı SSD/H2D ve mevcut C++ runtime karşılaştırması için Release build ile:
+
+```sh
+.venv/bin/python scripts/benchmark_transfers.py --build build/native-cuda \
+  --scratch /path/on/target/nvme --output benchmarks/results/transfer-sweep
+```
+
+Komut yalnız kendi 256 MiB geçici test dosyasını oluşturur/siler; var olan dosyalara yazmaz.
+Ön kontrol için `--smoke` eklenebilir. Beş tekrarlı ölçüm yöntemi ve karşılaştırma sınırları
+`docs/BENCHMARK_PROTOCOL.md` içinde tanımlıdır.
+
 `O_DIRECT` ring ile aynı host-bellek sahipliği modelini kullanan izole H2D denominator'ı:
 
 ```sh

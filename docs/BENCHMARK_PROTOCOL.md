@@ -93,6 +93,50 @@ library-parity W4 denominator is selected and documented. Before emitting a timi
 naive kernel must pass its CPU reduction-tree oracle at
 `abs(actual - expected) <= 2e-5 + 2e-6 * abs(expected)`; see D-021.
 
+## Bounded SSD/H2D sweep
+
+The opt-in runner creates a new 256 MiB deterministic pack in a unique temporary directory on the
+requested filesystem, fsyncs it, and removes only its own fixture at exit. fio receives
+`--readonly --allow_file_create=0 --direct=1 --ioengine=io_uring`. No raw device, existing pack,
+clock setting, cache-dropping sysctl or other user's workload is modified. fio option semantics
+follow the [official fio documentation](https://fio.readthedocs.io/en/latest/fio_doc.html).
+
+From the repository root, after the explicit CUDA-ON/io_uring-ON **Release** build and correctness
+suite, run (the output directory must not exist):
+
+```sh
+.venv/bin/python scripts/benchmark_transfers.py \
+  --build build/native-cuda --scratch /target/nvme/harpq-scratch \
+  --output benchmarks/results/transfer-sweep
+```
+
+Add `--smoke` for one 128 KiB functional round at 64 KiB, including invalid argument/volume and
+corrupt-CRC rejection checks. Smoke rates are not performance evidence. The full sweep uses
+64 KiB, 256 KiB and 1 MiB payloads, 16 MiB warm-up, 256 MiB timed volume and five repetitions per
+case, reversing size/method order on alternating repetitions. Report the median and full observed
+range, not the best run. Methods:
+
+- fio sequential reads at QD1 and QD8; ordinary buffers, submit/completion batches of one. Validate
+  successful completion, exact read volume, zero writes and at least 90% of timed requests in the
+  target depth bucket. Short warm-up runs retain the depth distribution without that threshold.
+- `harpq_transfer_benchmark direct PACK BYTES WARMUP ITERATIONS`: the existing CPU direct reader,
+  one ordinary aligned ring slot and QD1, with CRC and dispatch included in host wall time.
+- The same executable's `bridge` mode: registered ring, QD1, per-packet GPU allocation/free and
+  completion wait included. Pre/post full-payload D2H checks are outside timing; every timed read
+  checks CRC. Both modes require logical=physical bytes and record SQE/CQE totals, statx alignment,
+  critical-path p50/p95 and host-observed component means. Each native case has two additional
+  untimed verification packets; timings include fixed harness checks and sample collection.
+- Existing `harpq_h2d_benchmark`: equal payload/warm-up/timed volume, one stream with queued copies
+  bracketed by CUDA events, allocation outside timing and sampled D2H verification afterward.
+  It is not queue-semantics-matched to serial per-packet runtime waits.
+
+The native QD1/fio-QD1 ratio diagnoses runtime overhead, not a raw NVMe limit. fio QD8 and queued
+H2D are separate capability denominators; never divide a host-observed runtime component into the
+CUDA-event denominator to claim the 80% gate. `acceptance_evidence=false` remains explicit because
+this is a short, warm, synthetic baseline without model/compute overlap, cold-cache control,
+production queueing or locked clocks. Read amplification of 1 only describes these fully aligned
+fixtures. Preserve all command/stdout/stderr records, binary hashes, GPU snapshots and JSON hashes.
+
 ## End-to-end model protocol
 
 Start with Mistral-7B dense, then Mixtral-8x7B MoE. For each model use at least two constrained
