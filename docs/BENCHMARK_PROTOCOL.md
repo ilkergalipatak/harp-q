@@ -79,7 +79,7 @@ PYTHONPATH=src python scripts/check_native_feedback.py build/native-service-obse
 ```
 
 The assert-based checker must run without Python `-O`. Three completed serial reads at each of
-64 KiB, 256 KiB and 1 MiB use two host slots, default read queue depth, 29 bytes of padding per
+64 KiB, 256 KiB and 1 MiB use two host slots, configured queue depth 8 (effective depth 1), 29 bytes of padding per
 packet, and a fresh GPU allocation per upload. The fixture has no calibration warm-up, computes no
 model, and verifies every logical byte through D2H. Its samples prove schema ingestion, exact-byte
 bucket selection and deterministic replay, not percentile stability or a tuned runtime policy.

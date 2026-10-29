@@ -1,19 +1,20 @@
 # HARP-Q handoff
 
-Latest Linux verification: 2026-10-29 on the native Ubuntu 24.04 RTX 4090 host, from clean source
-commit `44eac3e`. The fourth slice's 74 Python tests and all nine CPU/CUDA tests passed. Earlier
-Mac and performance evidence is dated separately below. This file is the recovery source if the
+Latest Linux verification: 2026-10-30 Europe/Istanbul (2026-10-29 UTC) on the native Ubuntu 24.04
+RTX 4090 host. Tested source matches commit `913211e` byte-for-byte. All 74 Python tests and ten
+CPU/CUDA tests passed; the new direct-H2D bridge also passed UBSan and measured-sample replay.
+Earlier Mac and performance evidence is dated separately below. This file is the recovery source if the
 Codex task cannot be handed off directly.
 
 ## Repository
 
 - Remote: `https://github.com/ilkergalipatak/harp-q.git`
 - Branch: `main`
-- Latest validated runtime source commit: `44eac3e6e81ac824ca8929ca65dd89d8934d6fee`
+- Latest validated runtime source commit: `913211e42fc9e7778c995eda240b8b5fa40d3643`
 - Performance-baseline source commit: `2a6c481a077fd11e46fc5e68a6da10b78389a9d5`
 - Python package: `harpq`, Python 3.11+
 - Native floor: CMake 3.24+, C++17; CUDA toolkit 11.8+ when enabled
-- Validated Mac runtime: Python 3.12.13, NumPy 2.3.5
+- Validated Mac runtime: Python 3.12.14, NumPy 2.3.5
 - Validated Ubuntu runtime: Python 3.12.3, NumPy 2.3.5
 - Dependency locks: `requirements/runtime.lock`, `requirements/build.lock`
 
@@ -68,7 +69,7 @@ The first three native correctness/performance-bring-up slices are validated:
 - The canonical v1 Python writer now zero-pads each non-empty pack tail to 4096 bytes while readers
   retain buffered compatibility with old unpadded terminal tails.
 - Root/native CMake: `HARPQ_ENABLE_CUDA=AUTO|ON|OFF`; explicit `ON` fails without CUDA, while a
-  CPU-only test run records all five CUDA-only tests as explained CTest skips. CUDA architectures
+  CPU-only test run records all six CUDA-dependent tests as explained CTest skips. CUDA architectures
   supplied through CMake or `CUDAARCHS` are preserved; otherwise the project defaults to `sm_89`.
 - CPU CI runs the Python suite, CLI smoke, generated-fixture drift check, and native CPU CTest on
   macOS and Ubuntu. The Linux job installs liburing and builds the direct-I/O adapter in `AUTO`
@@ -79,11 +80,25 @@ The fourth slice passed its Linux correctness gate on 2026-10-29:
 - `native/src/direct_packet_io_linux.cpp`: Linux CPU-only `io_uring + O_DIRECT` adapter using strict
   `STATX_DIOALIGN`, bounded ordinary reads into `PacketRing` slots, cooperative cancellation,
   logical CRC, and a distinct legacy `buffered-only` outcome. It has no fixed-buffer registration,
-  CUDA ownership bridge, fork support, or throughput claim.
+  fork support, or throughput claim. The fifth slice composes it with CUDA ownership below.
 - `scheduler.py` trace v2: caller-supplied ordered `ServiceObservation` values, exact
   `(service_class, logical_bytes, physical_io_bytes)` rolling-p95 buckets, auditable estimate
   sources, and unchanged v1 replay. I/O/H2D component durations are audit-only; the observed
   critical path drives deadlines.
+
+The fifth slice adds a lifetime-safe storage-to-device path:
+
+- `CudaDirectPackFile` retains a private CUDA ring facade and drains outstanding original CQEs
+  before releasing its registration owner. Ready packets remain usable after both caller facades
+  are destroyed. Required/optional/backpressure/cancellation semantics remain those of the reader.
+- `CudaPacketTransfer` owns the destination allocation and H2D lease; destruction proves DMA
+  completion before releasing either. Consumers must retain it through downstream compute.
+- Host-observed storage-submission-to-device-ready durations use service class
+  `direct-h2d/host-observed-v1`; failed or abandoned transfers emit no successful sample. The caller
+  supplies global sequence IDs when exporting. CPU polling, CRC, dispatch and per-upload allocation
+  remain part of the critical path; these are not isolated device-event timings.
+- `scripts/check_native_feedback.py` checks the native fixture's nine observations against exact
+  byte/class buckets, default p95 selection and deterministic trace round-trip/replay.
 
 Architecture decisions are in `DECISIONS.md`; file/layout contracts are in `FORMAT.md`; benchmark
 gates are in `BENCHMARK_PROTOCOL.md`; the measured host summary is in `HOST_BASELINE.md`.
@@ -224,7 +239,72 @@ CTest logs remain in the ignored build directories on Ubuntu:
 
 This run adds correctness evidence only. Sanitizers, hidden-device/AUTO cases, full fio/H2D
 benchmarks, and model-quality/throughput evaluation were not rerun. The earlier performance
-measurements remain tied to `2a6c481`; the io_uring-to-CUDA bridge is still the next implementation.
+measurements remain tied to `2a6c481`; the bridge was implemented in the next slice below.
+
+### 2026-10-30 — owning direct-H2D bridge
+
+Tests ran in an isolated Ubuntu directory, then SHA-256 comparison of every tracked file under
+`native`, `src`, `tests`, `scripts`, plus root CMake/Makefile/pyproject, verified exact equality with
+the clean pulled commit `913211e42fc9e7778c995eda240b8b5fa40d3643`. No model weights or large
+artifacts were committed. The target was the same RTX 4090, driver 580.173.02, CUDA 12.0.140,
+G++ 12.4.0, Python 3.12.3/NumPy 2.3.5, liburing 2.5 and ext4 `/dev/nvme0n1p4` (`rw,relatime`).
+
+Reproduction commands (run from the repository root; test directories must exist):
+
+```sh
+make test smoke golden-check PYTHON=.venv/bin/python
+cmake -S . -B build/bridge-cpu -DHARPQ_ENABLE_CUDA=OFF \
+  -DHARPQ_ENABLE_IO_URING=ON -DBUILD_TESTING=ON -DCMAKE_CXX_COMPILER=/usr/bin/g++-12
+cmake --build build/bridge-cpu --parallel 4
+HARPQ_DIRECT_IO_TEST_DIR="$PWD/build/bridge-cpu" \
+  ctest --test-dir build/bridge-cpu --output-on-failure
+
+cmake -S . -B build/bridge-cuda -DHARPQ_ENABLE_CUDA=ON -DHARPQ_ENABLE_IO_URING=ON \
+  -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=/usr/bin/g++-12 \
+  -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-12 -DCMAKE_CUDA_ARCHITECTURES=89
+cmake --build build/bridge-cuda --parallel 4
+HARPQ_DIRECT_IO_TEST_DIR="$PWD/build/bridge-cuda" \
+  ctest --test-dir build/bridge-cuda --output-on-failure
+HARPQ_DIRECT_IO_TEST_DIR="$PWD/build/bridge-cuda" \
+  build/bridge-cuda/native/cuda/harpq_cuda_direct_packet_io_test --json \
+  > build/native-service-observations.json
+PYTHONPATH=src .venv/bin/python scripts/check_native_feedback.py build/native-service-observations.json
+```
+
+Results: 74 Python tests, doctor and golden drift pass on both Mac and Linux. CUDA-OFF/io_uring-ON
+has four passes and six reasoned skips. CUDA-ON/io_uring-ON has ten passes, no skips. The bridge
+test covers byte equality against pread and D2H; facade and abandoned-operation lifetime; CRC,
+required/optional, cancellation/backpressure and legacy tails; event-record retry/event-query
+failure; compute-stream ordering; concurrent read polling and observation validity. Nine real
+fixture transfers (three at each 64 KiB/256 KiB/1 MiB physical size) round-trip and replay exactly
+through the Python scheduler. They are not model or throughput measurements.
+
+A separate CUDA-ON/io_uring-ON build with
+`-DCMAKE_CXX_FLAGS="-fsanitize=undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"` built and
+passed `harpq_cuda_direct_packet_io_test` (C++ host-path UBSan, not CUDA device memcheck). Hiding
+the GPU with `CUDA_VISIBLE_DEVICES=""` made the explicit-ON bridge executable exit 1, not skip.
+Temporarily inverting the observation-completion condition made the test fail as expected; the
+condition was restored and the full CUDA suite passed afterward. AUTO-hidden-GPU, ASan,
+compute-sanitizer, matched fio/H2D throughput, overlap and real models were not rerun. Mac native
+CMake tests were not rerun because CMake is absent from the current Mac PATH.
+
+Copied evidence is retained under the Ubuntu clone's ignored
+`build/evidence-913211e-20261030/` directory:
+
+| Artifact | SHA-256 |
+|---|---|
+| `cpu.log` | `c737300909822fe0f04a4b5fe966c1207f8e4550f16b5d091d736321c69108be` |
+| `cuda.log` | `4b0f247a66cea833b58d7bb87839626c1ff9cba1790c38930730c2bd7e74a1c5` |
+| `ubsan.log` | `14568b45e58458c46b574ce0da63691cade6a3655098cb4a994f5c71801cc2d7` |
+| `native-service-observations.json` | `1929ede78a3465fda6ab418c785501bfa402e95bb0c6ee3e519d3b5d37a3012d` |
+
+The source-list digest below was identical in the tested directory and clean clone:
+`5b9e177897ff758cfb0a798016c47786a87887c3298fbb5dfe0bc5e676e0aa10`.
+
+```sh
+git ls-files -z CMakeLists.txt native src tests scripts Makefile pyproject.toml \
+  | xargs -0 sha256sum | sha256sum
+```
 
 ## Known limits — do not overclaim
 
@@ -232,10 +312,10 @@ measurements remain tied to `2a6c481`; the io_uring-to-CUDA bridge is still the 
   optimized against a production or library-parity static-W4 implementation. Its current naive-W4
   ratio is exploratory and cannot satisfy the ≥85% acceptance gate.
 - The cuBLAS path still materializes FP32 weights by design because it is the correctness oracle.
-- There is no native full-container/index reader, native scheduler, device cache, or lifetime-safe
-  io_uring-to-CUDA bridge yet. The Linux CPU direct adapter uses `io_uring + O_DIRECT`, but only as a
-  strict functional path against the synchronous buffered `pread` oracle; it proves neither
-  fixed-buffer use, asynchronous GPU overlap, nor NVMe throughput.
+- There is no native full-container/index reader, native scheduler or device cache. The owning
+  io_uring-to-CUDA bridge is a strict functional path against buffered `pread`/D2H, with per-packet
+  `cudaMalloc/cudaFree`. It proves neither fixed io_uring buffer use, asynchronous GPU overlap,
+  nor NVMe throughput. Downstream compute lifetime remains the consumer's responsibility.
 - The CUDA ring registers its complete fixed allocation and has one copy stream plus per-slot
   events. It has no bounded registration-capacity probe, multi-ring concurrency policy, or measured
   runtime queue depth yet. Its catastrophic CUDA-safety policy is deliberately fail-stop rather
@@ -246,8 +326,8 @@ measurements remain tied to `2a6c481`; the io_uring-to-CUDA bridge is still the 
 - No PyTorch custom op, Mistral/Mixtral adapter, real checkpoint, or model-quality evaluation exists.
 - The host profiler's fio and H2D values are bounded capability denominators only. Runtime H2D,
   overlap, read amplification, TTFT, inter-token latency, and Pareto gates remain open.
-- Scheduler trace v2 can consume completed service observations, but no native runtime currently
-  emits the end-to-end storage-submission-to-device-ready measurement needed to populate them.
+- Native service observations now populate trace v2 in a functional integration check; their
+  small synthetic sample set is not production calibration. No live native scheduler is connected.
 - Direct-I/O operation IDs are monotonic only within one `DirectPackFile`; multi-pack tracing must
   key them by source as well. Catastrophic submit ambiguity/`IORING_CQE_F_MORE` and the less-used
   `Poll` terminal branches do not yet have the deterministic fault-injection coverage used by the
@@ -258,19 +338,17 @@ measurements remain tied to `2a6c481`; the io_uring-to-CUDA bridge is still the 
 
 ## Exact next implementation action
 
-Build an owning, lifetime-safe bridge from a completed `DirectPackFile` read into
-`CudaPacketRing`'s ready/H2D/in-flight lease chain. The bridge must keep the registered backing,
-io_uring operation, CUDA copy stream/event, and destination alive until both kernel I/O ownership
-and DMA completion are proven; it must not reach through either facade's private storage or make
-destruction order a caller convention. Preserve required/optional/backpressure/cancellation
-semantics and the fail-closed CUDA safety rule.
+Build a reproducible, bounded runtime benchmark at 64 KiB, 256 KiB and 1 MiB with matched fio and
+registered-H2D denominators: identical effective queue depth, volume, warm-up and repetitions.
+Record host-observed service cost separately from CUDA-event transfer timing; do not turn the
+correctness fixture's three samples per bucket into an acceptance result. Establish the cost of
+per-packet allocation before replacing it with bounded reusable GPU storage, then extend ownership
+through downstream compute when introducing the GPU cache. Preserve cancellation, backpressure,
+required/optional and fail-closed safety semantics. Measure actual overlap with an event timeline.
 
-Instrument that bridge from storage submission to device-ready completion and emit ordered
-`ServiceObservation` records with exact service class, logical bytes, physical bytes, and critical
-path. Keep I/O and H2D components audit-only, measure overlap separately, and compare 64 KiB,
-256 KiB, and 1 MiB runtime reads against size/queue-matched fio plus the registered-H2D denominator.
-Only after functional differential, lifetime/fault tests, and matched timing may these values feed
-the scheduler as runtime evidence. Do not begin Mistral/Mixtral integration yet.
+Production scheduler feedback must be calibrated for its actual service class and exact byte
+bucket. The 80% H2D, 75% fio, read-amplification and optimized-W4 gates remain open. Do not begin
+Mistral/Mixtral integration yet; native container/chunk integration and bounded cache are still needed.
 
 ## Recovery on either machine
 
