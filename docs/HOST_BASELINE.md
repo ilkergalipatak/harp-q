@@ -1,13 +1,20 @@
 # Native Ubuntu host baseline
 
-Last verified: 2026-08-09. This is a small reproducibility summary; raw passive, active, and
-microbenchmark outputs remain ignored artifacts on the measured host.
+Latest correctness verification: 2026-10-29. Performance measurements date from 2026-08-09.
+This is a small reproducibility summary; raw passive, active, and microbenchmark outputs remain
+ignored artifacts on the measured host.
 
 The performance measurements below were rebuilt from clean source commit
 `2a6c481a077fd11e46fc5e68a6da10b78389a9d5`. The newer packet-ring and `pread -> H2D`
 correctness evidence was rebuilt separately from clean source commit
 `9cc7dc593ab8c650dd7d21a41dd31e4b2492e246`. Both commits are on branch `main`; no old
 performance number is relabeled as a result from the newer runtime.
+
+On 2026-10-29, clean commit `44eac3e6e81ac824ca8929ca65dd89d8934d6fee` passed all 74 Python tests,
+four CPU/direct-I/O tests with CUDA disabled, and all nine native tests with CUDA and io_uring
+explicitly enabled. The target remained ext4 on `/dev/nvme0n1p4`, with RTX 4090, driver 580.173.02,
+CUDA 12.0.140, G++ 12.4.0, and liburing 2.5. Exact commands and CTest log hashes are in
+`HANDOFF.md`. This correctness run did not repeat the performance measurements below.
 
 ## Host
 
@@ -31,9 +38,9 @@ The initial scratch path resolves to ext4 on `/dev/nvme0n1p4`, backed by a Samsu
 2 TB. The mounted root filesystem exposes 1.5 TB, with approximately 1.3 TB free during the run.
 Other installed NVMe devices and unmounted partitions were not modified.
 
-## Verified reference gates
+## Verified reference gates — 2026-08-09
 
-- The latest runtime repository was clean at commit
+- The runtime repository for that run was clean at commit
   `9cc7dc593ab8c650dd7d21a41dd31e4b2492e246`.
 - All 67 Python CPU/reference tests passed on Python 3.12.3 and NumPy 2.3.5.
 - A clean CUDA-OFF CMake run passed stage codec, packet-ring, and buffered-`pread` tests and

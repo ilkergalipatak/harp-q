@@ -79,8 +79,7 @@ cmake --build build/native-cpu --parallel
 ctest --test-dir build/native-cpu --output-on-failure
 ```
 
-RTX 4090 Ubuntu hostunda dördüncü dilimin exact-source doğrulaması için kullanılacak açık gate
-yapılandırması:
+RTX 4090 Ubuntu hostunda `44eac3e` commit'i için 29 Ekim 2026'da doğrulanan yapılandırma:
 
 ```sh
 cmake -S . -B build/native-cuda \
@@ -100,8 +99,8 @@ stage codec, packet-ring state machine ve buffered `pread` politikasını ayrı 
 Dördüncü dilimde eklenen Linux direct-I/O testinin sözleşmesi, canonical padded
 pack için `io_uring + O_DIRECT` yolunu buffered `pread` oracle'ıyla fonksiyonel olarak
 karşılaştırmak; legacy unpadded terminal tail'i sessizce fallback yapmak yerine açıkça
-`buffered-only` olarak sınıflandırmaktır. Bu dilimin exact-source sonucu `docs/HANDOFF.md` içinde
-henüz doğrulanmış olarak kaydedilmemiştir. CUDA CTest bunlara ek olarak materialize-plus-cuBLAS
+`buffered-only` olarak sınıflandırmaktır. Aynı commit'te 74 Python testi ve CUDA/io_uring açıkken
+dokuz native test geçti; ortam ve komutlar `docs/HANDOFF.md` içindedir. CUDA CTest ayrıca materialize-plus-cuBLAS
 oracle'ını, doğrudan-decode fused GEMV'i, registered-ring `pread -> H2D -> stream-wait` zincirini ve
 küçük pinned-H2D smoke testini çalıştırır. Direct-I/O tamamlama lease'i henüz CUDA registered-ring
 ömür alanına bağlanmış değildir.

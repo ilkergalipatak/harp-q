@@ -1,15 +1,15 @@
 # HARP-Q handoff
 
-Last verified baseline: 2026-08-09 on the original Apple-silicon Mac and the native Ubuntu 24.04
-RTX 4090 host. Fourth-slice working-tree changes are explicitly marked pending below and are not
-covered by that baseline. This file is the recovery source if the Codex task cannot be handed off
-directly.
+Latest Linux verification: 2026-10-29 on the native Ubuntu 24.04 RTX 4090 host, from clean source
+commit `44eac3e`. The fourth slice's 74 Python tests and all nine CPU/CUDA tests passed. Earlier
+Mac and performance evidence is dated separately below. This file is the recovery source if the
+Codex task cannot be handed off directly.
 
 ## Repository
 
 - Remote: `https://github.com/ilkergalipatak/harp-q.git`
 - Branch: `main`
-- Latest validated runtime source commit: `9cc7dc593ab8c650dd7d21a41dd31e4b2492e246`
+- Latest validated runtime source commit: `44eac3e6e81ac824ca8929ca65dd89d8934d6fee`
 - Performance-baseline source commit: `2a6c481a077fd11e46fc5e68a6da10b78389a9d5`
 - Python package: `harpq`, Python 3.11+
 - Native floor: CMake 3.24+, C++17; CUDA toolkit 11.8+ when enabled
@@ -74,8 +74,7 @@ The first three native correctness/performance-bring-up slices are validated:
   macOS and Ubuntu. The Linux job installs liburing and builds the direct-I/O adapter in `AUTO`
   mode; macOS records a reasoned direct-I/O skip. Both jobs record explicit CUDA skips.
 
-The fourth slice is being integrated; its exact-source Linux results and source commit must be
-recorded before it is called validated:
+The fourth slice passed its Linux correctness gate on 2026-10-29:
 
 - `native/src/direct_packet_io_linux.cpp`: Linux CPU-only `io_uring + O_DIRECT` adapter using strict
   `STATX_DIOALIGN`, bounded ordinary reads into `PacketRing` slots, cooperative cancellation,
@@ -90,6 +89,8 @@ Architecture decisions are in `DECISIONS.md`; file/layout contracts are in `FORM
 gates are in `BENCHMARK_PROTOCOL.md`; the measured host summary is in `HOST_BASELINE.md`.
 
 ## Verified commands and results
+
+### 2026-08-09 — previous baseline
 
 On the original Mac, using the bundled interpreter:
 
@@ -177,20 +178,53 @@ The bounded host profile verified `io_uring + O_DIRECT` on the selected ext4/NVM
 filesystem. The raw JSON reports remain ignored on that host. See `HOST_BASELINE.md` for the exact
 hardware and smoke measurements.
 
-The fourth-slice working tree still requires an exact-source Mac/Linux verification record here.
-The older counts and commit above apply only to the last validated source; they are not evidence for
-the new direct-I/O or measured-feedback paths.
+### 2026-10-29 — fourth slice from committed source
 
-Before the final exception-lifetime and liburing configure-probe hardening, the fourth-slice tree
-passed 73 Python tests on Mac and Ubuntu, strict GCC 12 plus ASan/UBSan direct-I/O tests, four
-CPU/direct tests with five CUDA skips, and all nine CPU/CUDA tests on the RTX 4090. Subsequent
-hardening moves terminal-operation ownership before failure-message allocation, strengthens the
-configure-time API check, requires exact versioned trace schemas, and prevents generic `EINVAL`
-from becoming an AUTO-mode test skip. The final Mac worktree passes 74 Python tests, but its exact
-source was not rerun on Ubuntu because the remote Codex execution allowance was exhausted. Treat
-the preceding Linux results as near-source diagnostic evidence, not as an exact-source validation
-record; rerun the commands above or rely on a green CI run before promoting this slice to the
-validated baseline.
+The Ubuntu clone was clean before and after testing at
+`44eac3e6e81ac824ca8929ca65dd89d8934d6fee`. This closes the previously blocked Linux rerun of the
+terminal-operation ownership fix, liburing API check, strict trace-v1/v2 schema validation, and
+restricted AUTO skip policy. The earlier Mac worktree passed 74 Python tests; Mac tests were not
+rerun during this Linux verification.
+
+Environment: Ubuntu 24.04.4, kernel `6.11.0-28-generic`, Python 3.12.3, NumPy 2.3.5, CMake 3.28.3,
+G++ 12.4.0, CUDA toolkit 12.0.140, liburing 2.5, RTX 4090 (24,564 MiB), NVIDIA driver 580.173.02.
+Both direct-I/O test directories resolved to ext4 on `/dev/nvme0n1p4`, mounted `rw,relatime`.
+
+Run from the repository root:
+
+```sh
+CXX=/usr/bin/g++-12 CMAKE_BUILD_PARALLEL_LEVEL=4 \
+  HARPQ_DIRECT_IO_TEST_DIR="$PWD/build/evidence-44eac3e-20261029-cpu" \
+  make check PYTHON=.venv/bin/python \
+    NATIVE_BUILD_DIR=build/evidence-44eac3e-20261029-cpu \
+    NATIVE_CUDA=OFF NATIVE_IO_URING=ON
+
+cmake -S . -B build/evidence-44eac3e-20261029-cuda \
+  -DHARPQ_ENABLE_CUDA=ON -DHARPQ_ENABLE_IO_URING=ON -DBUILD_TESTING=ON \
+  -DCMAKE_CXX_COMPILER=/usr/bin/g++-12 \
+  -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-12 \
+  -DCMAKE_CUDA_ARCHITECTURES=89
+cmake --build build/evidence-44eac3e-20261029-cuda --parallel 4
+HARPQ_DIRECT_IO_TEST_DIR="$PWD/build/evidence-44eac3e-20261029-cuda" \
+  ctest --test-dir build/evidence-44eac3e-20261029-cuda --output-on-failure
+```
+
+Results: all 74 Python tests, CLI doctor, and golden drift passed. The CUDA-OFF build passed four
+CPU/direct-I/O tests and explicitly skipped the five CUDA tests. With CUDA and io_uring both `ON`,
+all nine CTest entries passed with no skips, including direct reads, the CUDA oracle, fused GEMV,
+registered-ring lifetime/fault tests, and H2D/GEMV smoke tests. The liburing compile/link API check
+passed in both builds.
+
+CTest logs remain in the ignored build directories on Ubuntu:
+
+| Log | SHA-256 |
+|---|---|
+| `build/evidence-44eac3e-20261029-cpu/Testing/Temporary/LastTest.log` | `0cae9380ec680d9d086791f26be8f7869d62590215eb0d6235d92b89fbb3c1c2` |
+| `build/evidence-44eac3e-20261029-cuda/Testing/Temporary/LastTest.log` | `1c61d87aa6c2c96537712d44fcb39524ef777d1af0f20d066b7540a507b4ede6` |
+
+This run adds correctness evidence only. Sanitizers, hidden-device/AUTO cases, full fio/H2D
+benchmarks, and model-quality/throughput evaluation were not rerun. The earlier performance
+measurements remain tied to `2a6c481`; the io_uring-to-CUDA bridge is still the next implementation.
 
 ## Known limits — do not overclaim
 
