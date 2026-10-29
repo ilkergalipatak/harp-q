@@ -41,10 +41,10 @@ def _doctor(arguments: argparse.Namespace) -> int:
         "cuda_driver_device_available": profile.cuda_available,
         "nvidia_performance_tests_supported": False,
         "nvidia_performance_tests_reason": (
-            "a correctness-first fused GEMV, registered pread-to-H2D ring, and Linux CPU "
-            "io_uring/O_DIRECT correctness adapter are implemented; optimized throughput/"
-            "static-W4 validation, the lifetime-safe direct-I/O-to-CUDA bridge, and model "
-            "integration are pending"
+            "a correctness-first fused GEMV, registered pread-to-H2D ring, Linux CPU "
+            "io_uring/O_DIRECT correctness adapter, and lifetime-safe direct-I/O-to-CUDA bridge "
+            "are implemented; optimized throughput/static-W4 validation, matched runtime "
+            "I/O/H2D benchmarks, and model integration are pending"
         ),
     }
     if arguments.json:

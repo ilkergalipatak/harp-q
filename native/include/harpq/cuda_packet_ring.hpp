@@ -21,6 +21,7 @@ class CudaPacketRingControl;
 class CudaReadySlotLease;
 class CudaInFlightSlotLease;
 class CudaPacketRingTestAccess;
+class CudaDirectPackFile;
 
 // CUDA-owning counterpart of FillingSlotLease. The additional shared control
 // keeps the whole host registration alive even when the CudaPacketRing facade
@@ -67,11 +68,17 @@ class CudaReadySlotLease final {
 
   [[nodiscard]] bool valid() const noexcept;
   [[nodiscard]] ReadyPacketView view() const;
+  [[nodiscard]] int device_ordinal() const;
+  // Retains the registration independently of the ring facade. The caller
+  // owns device_destination until completion and any dependent compute ends.
+  [[nodiscard]] CudaInFlightSlotLease EnqueueH2d(
+      void* device_destination, std::size_t destination_capacity_bytes) &&;
   void Release() noexcept;
 
  private:
   friend class CudaFillingSlotLease;
   friend class CudaPacketRing;
+  friend class CudaDirectPackFile;
   CudaReadySlotLease(std::shared_ptr<detail::CudaPacketRingControl> control,
                      ReadySlotLease lease) noexcept;
 
@@ -102,6 +109,7 @@ class CudaInFlightSlotLease final {
 
  private:
   friend class CudaPacketRing;
+  friend class CudaReadySlotLease;
   CudaInFlightSlotLease(
       std::shared_ptr<detail::CudaPacketRingControl> control,
       InFlightSlotLease lease,
@@ -160,6 +168,10 @@ class CudaPacketRing final {
 
  private:
   friend class CudaPacketRingTestAccess;
+  friend class CudaDirectPackFile;
+  // Only the owning direct-I/O adapter may bind a reader to this retained core.
+  explicit CudaPacketRing(std::shared_ptr<detail::CudaPacketRingControl> control) noexcept;
+  [[nodiscard]] PacketRing& DirectIoCore();
   enum class TestFault : std::uint32_t {
     kHostRegister = 1U << 0U,
     kEventRecord = 1U << 1U,

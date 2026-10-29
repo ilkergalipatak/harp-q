@@ -252,6 +252,10 @@ void TestDifferentialCanonicalRead(const std::string& path) {
           "canonical direct read did not become ready");
   Require(completed.operation_id == submitted.operation_id,
           "completion operation ID changed");
+  Require(submitted.submitted_at.has_value() &&
+              completed.submitted_at == submitted.submitted_at &&
+              *completed.submitted_at <= std::chrono::steady_clock::now(),
+          "submission timestamp was lost or changed");
   Require(ReadyBytes(completed) == logical,
           "canonical direct payload differs from source");
   Require(ReadyBytes(completed) == buffered_bytes,

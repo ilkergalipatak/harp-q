@@ -74,6 +74,26 @@ set_target_properties(harpq_cuda_packet_ring PROPERTIES
   POSITION_INDEPENDENT_CODE ON
 )
 
+if(HARPQ_HAS_IO_URING)
+  add_library(harpq_cuda_direct_packet_io STATIC ../src/cuda_direct_packet_io.cpp)
+  add_library(HARPQ::cuda_direct_packet_io ALIAS harpq_cuda_direct_packet_io)
+  target_compile_features(harpq_cuda_direct_packet_io PUBLIC cxx_std_17)
+  target_link_libraries(harpq_cuda_direct_packet_io
+    PUBLIC HARPQ::cuda_packet_ring HARPQ::direct_packet_io)
+  target_compile_options(harpq_cuda_direct_packet_io PRIVATE -Wall -Wextra -Wpedantic)
+  set_target_properties(harpq_cuda_direct_packet_io PROPERTIES
+    CXX_EXTENSIONS OFF POSITION_INDEPENDENT_CODE ON)
+  if(BUILD_TESTING)
+    add_executable(harpq_cuda_direct_packet_io_test ../tests/cuda_direct_packet_io_test.cpp)
+    target_link_libraries(harpq_cuda_direct_packet_io_test PRIVATE HARPQ::cuda_direct_packet_io)
+    target_compile_definitions(harpq_cuda_direct_packet_io_test PRIVATE
+      HARPQ_TEST_REQUIRE_CUDA=$<STREQUAL:${HARPQ_ENABLE_CUDA},ON>
+      HARPQ_TEST_REQUIRE_IO=$<STREQUAL:${HARPQ_ENABLE_IO_URING},ON>)
+    add_test(NAME native.cuda_direct_packet_io COMMAND harpq_cuda_direct_packet_io_test)
+    set_tests_properties(native.cuda_direct_packet_io PROPERTIES TIMEOUT 30 SKIP_RETURN_CODE 77)
+  endif()
+endif()
+
 add_executable(harpq_h2d_benchmark
   ../benchmarks/h2d_benchmark.cu
 )

@@ -14,7 +14,9 @@ packet ring; doğruluk-odaklı buffered `pread`; whole-allocation `cudaHostRegis
 compute-stream event bağımlılığını içerir. Linux'a özgü CPU doğruluk adaptörü, yalnız
 `STATX_DIOALIGN` ile bildirilen geometriyi yetkili kabul ederek `io_uring` ordinary
 `IORING_OP_READ` işlemlerini `O_DIRECT` ile doğrudan packet-ring slotlarına gönderir. Bu ilk
-adaptör fixed-buffer kaydı veya CUDA ömür köprüsü değildir ve NVMe throughput iddiası taşımaz.
+adaptör fixed-buffer kaydı değildir. `CudaDirectPackFile` köprüsü, aynı okuyucuyu CUDA kaydı
+korunan ring'e bağlar; `CudaPacketTransfer` GPU hedefini ve H2D tamamlanmasını birlikte sahiplenir.
+Bu doğruluk yolu henüz NVMe throughput veya kopyalama/hesaplama overlap iddiası taşımaz.
 Mac sonuçları yalnızca fonksiyonel doğruluk içindir; NVIDIA ve NVMe performans kabul ölçümleri
 native Linux hostunda ayrıca yapılır.
 
@@ -79,7 +81,7 @@ cmake --build build/native-cpu --parallel
 ctest --test-dir build/native-cpu --output-on-failure
 ```
 
-RTX 4090 Ubuntu hostunda `44eac3e` commit'i için 29 Ekim 2026'da doğrulanan yapılandırma:
+RTX 4090 Ubuntu hostunda kullanılan açık CUDA/io_uring doğrulama yapılandırması:
 
 ```sh
 cmake -S . -B build/native-cuda \
@@ -99,13 +101,29 @@ stage codec, packet-ring state machine ve buffered `pread` politikasını ayrı 
 Dördüncü dilimde eklenen Linux direct-I/O testinin sözleşmesi, canonical padded
 pack için `io_uring + O_DIRECT` yolunu buffered `pread` oracle'ıyla fonksiyonel olarak
 karşılaştırmak; legacy unpadded terminal tail'i sessizce fallback yapmak yerine açıkça
-`buffered-only` olarak sınıflandırmaktır. Aynı commit'te 74 Python testi ve CUDA/io_uring açıkken
-dokuz native test geçti; ortam ve komutlar `docs/HANDOFF.md` içindedir. CUDA CTest ayrıca materialize-plus-cuBLAS
+`buffered-only` olarak sınıflandırmaktır. Beşinci dilim, direct okuyucuyu CUDA registered-ring'e
+bağlar; native test sayısı ona çıkar. Ortam ve doğrulama kayıtları `docs/HANDOFF.md` içindedir.
+CUDA CTest ayrıca materialize-plus-cuBLAS
 oracle'ını, doğrudan-decode fused GEMV'i, registered-ring `pread -> H2D -> stream-wait` zincirini ve
-küçük pinned-H2D smoke testini çalıştırır. Direct-I/O tamamlama lease'i henüz CUDA registered-ring
-ömür alanına bağlanmış değildir.
+küçük pinned-H2D smoke testini çalıştırır. Yeni köprü testi, direct/pread byte eşleşmesini,
+okuyucu/ring yok edildikten sonra lease ömrünü, hata/iptal politikasını ve GPU verisini doğrular.
 
-Gelecekteki `O_DIRECT` ring ile aynı bellek sahipliği modelini kullanan izole H2D denominator'ı:
+Hedef NVMe üzerindeki **mevcut** bir test klasörünü seçerek gerçek aktarım kayıtlarını scheduler'a
+aktarma ve deterministik replay kontrolü (Python'u `-O` ile çalıştırmayın):
+
+```sh
+HARPQ_DIRECT_IO_TEST_DIR=/path/on/target/nvme \
+  build/native-cuda/native/cuda/harpq_cuda_direct_packet_io_test --json \
+  > build/native-service-observations.json
+PYTHONPATH=src python scripts/check_native_feedback.py build/native-service-observations.json
+```
+
+Üç boyutta üçer sentetik paket aktarımı yapılır: 64 KiB, 256 KiB, 1 MiB fiziksel okuma; her birinde
+29 byte padding vardır. `direct-h2d/host-observed-v1` süreleri CRC, host polling/dispatch ve kritik
+yolda paket başına `cudaMalloc` maliyetini içerir. Bu kayıtlar format/replay doğrulamasıdır;
+kalibre edilmiş production scheduler maliyeti veya bant genişliği kabul sonucu değildir.
+
+`O_DIRECT` ring ile aynı host-bellek sahipliği modelini kullanan izole H2D denominator'ı:
 
 ```sh
 build/native-cuda/native/cuda/harpq_h2d_benchmark --json

@@ -58,9 +58,33 @@ device-ready under the lifetime-safe SSD-to-CUDA path. Label every observation w
 `service_class`, logical packet bytes, and physical I/O bytes; do not reuse a sample across another
 class or byte bucket. Record I/O and H2D component times when their clock domains and endpoints are
 well defined, but treat them as audit metadata only. Do not add the components or infer overlap
-from them: report overlap separately using the event timeline required above. Until the direct
-reader owns a safe bridge through CUDA completion and these endpoints are instrumented, it must not
-emit scheduler service observations as end-to-end runtime evidence.
+from them: report overlap separately using the event timeline required above.
+
+### Direct-H2D correctness observations (not acceptance evidence)
+
+`CudaDirectPackFile` now retains the registered ring through original read CQEs and H2D completion.
+The native test emits `direct-h2d/host-observed-v1` samples from immediately before the first SQE
+preparation through successful host observation of the completion event. Durations include CPU
+polling/dispatch, CRC and destination allocation in the critical path. I/O ends after CRC and ready
+wrapping; the H2D component starts after allocation, so components intentionally omit intervening
+host work. They must not be interpreted as isolated device-transfer rates.
+
+Use an existing scratch directory on the target filesystem:
+
+```sh
+HARPQ_DIRECT_IO_TEST_DIR=/target/nvme/harpq-scratch \
+  build/native-cuda/native/cuda/harpq_cuda_direct_packet_io_test --json \
+  > build/native-service-observations.json
+PYTHONPATH=src python scripts/check_native_feedback.py build/native-service-observations.json
+```
+
+The assert-based checker must run without Python `-O`. Three completed serial reads at each of
+64 KiB, 256 KiB and 1 MiB use two host slots, default read queue depth, 29 bytes of padding per
+packet, and a fresh GPU allocation per upload. The fixture has no calibration warm-up, computes no
+model, and verifies every logical byte through D2H. Its samples prove schema ingestion, exact-byte
+bucket selection and deterministic replay, not percentile stability or a tuned runtime policy.
+Matched fio/H2D runs at representative queue depth, preallocated device storage, and an event
+timeline for overlap remain prerequisites for throughput acceptance and production feedback.
 
 `harpq_gemv_benchmark` currently uses a benchmark-local naive static-W4 kernel with matched launch
 geometry. It is useful for regression and tuning direction only: its output explicitly sets

@@ -453,6 +453,13 @@ ReadyPacketView CudaReadySlotLease::view() const {
   return lease_.view();
 }
 
+int CudaReadySlotLease::device_ordinal() const {
+  if (!valid()) {
+    ThrowInvalidCudaLease("device_ordinal");
+  }
+  return control_->device_ordinal;
+}
+
 void CudaReadySlotLease::Release() noexcept {
   lease_.Release();
   control_.reset();
@@ -538,6 +545,17 @@ cudaError_t CudaInFlightSlotLease::MakeStreamWait(
 CudaPacketRing::CudaPacketRing(PacketRingConfig config)
     : control_(CreateControl(std::move(config))) {}
 
+CudaPacketRing::CudaPacketRing(
+    std::shared_ptr<detail::CudaPacketRingControl> control) noexcept
+    : control_(std::move(control)) {}
+
+PacketRing& CudaPacketRing::DirectIoCore() {
+  if (control_ == nullptr) {
+    throw std::logic_error("cannot bind a moved-from CUDA packet ring");
+  }
+  return control_->ring;
+}
+
 std::optional<CudaFillingSlotLease> CudaPacketRing::TryAcquireFilling() {
   if (control_ == nullptr) {
     throw std::logic_error("cannot acquire from a moved-from CUDA packet ring");
@@ -563,8 +581,15 @@ CudaInFlightSlotLease CudaPacketRing::EnqueueH2d(
     throw std::invalid_argument(
         "CUDA ready lease belongs to a different packet ring");
   }
+  return std::move(ready).EnqueueH2d(device_destination, destination_capacity_bytes);
+}
 
-  const ReadyPacketView view = ready.lease_.view();
+CudaInFlightSlotLease CudaReadySlotLease::EnqueueH2d(
+    void* device_destination, std::size_t destination_capacity_bytes) && {
+  if (!valid()) {
+    ThrowInvalidCudaLease("enqueue H2D");
+  }
+  const ReadyPacketView view = lease_.view();
   if (device_destination == nullptr) {
     throw std::invalid_argument("H2D device destination cannot be null");
   }
@@ -606,13 +631,13 @@ CudaInFlightSlotLease CudaPacketRing::EnqueueH2d(
   completion->Arm();
 
   InFlightSlotLease in_flight =
-      std::move(ready.lease_).BeginH2d(std::move(completion));
-  auto retained_control = ready.control_;
-  ready.control_.reset();
+      std::move(lease_).BeginH2d(std::move(completion));
+  const cudaEvent_t event = control_->completion_events[view.slot_index];
+  auto retained_control = std::move(control_);
   return CudaInFlightSlotLease(
       std::move(retained_control),
       std::move(in_flight),
-      control_->completion_events[view.slot_index]);
+      event);
 }
 
 CudaPacketLoadResult CudaPacketRing::Load(

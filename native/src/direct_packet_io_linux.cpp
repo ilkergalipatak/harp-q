@@ -302,6 +302,7 @@ class DirectPackFileImpl final {
       AbortForUnprovenDirectIoSafety();
     }
     PendingRead& tracked = insertion.first->second;
+    tracked.submitted_at = std::chrono::steady_clock::now();
     if (!SubmitRead(tracked)) {
       DirectPacketReadStats blocked_stats = tracked.stats;
       pending_.erase(insertion.first);
@@ -313,6 +314,7 @@ class DirectPackFileImpl final {
     submitted.status = DirectPacketLoadStatus::kSubmitted;
     submitted.operation_id = operation_id;
     submitted.stats = tracked.stats;
+    submitted.submitted_at = tracked.submitted_at;
     return submitted;
   }
 
@@ -390,6 +392,7 @@ class DirectPackFileImpl final {
     FillingSlotLease filling;
     DirectPacketReadStats stats;
     std::size_t completed_bytes;
+    std::chrono::steady_clock::time_point submitted_at{};
   };
 
   static_assert(
@@ -883,6 +886,7 @@ class DirectPackFileImpl final {
     result.operation_id = operation_id;
     result.ready.emplace(std::move(ready));
     result.stats = std::move(completed.stats);
+    result.submitted_at = completed.submitted_at;
     return result;
   }
 

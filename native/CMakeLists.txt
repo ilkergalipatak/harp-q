@@ -20,6 +20,13 @@ else()
   target_compile_options(harpq_native PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+if(BUILD_TESTING AND NOT (HARPQ_HAS_CUDA AND HARPQ_HAS_IO_URING))
+  add_executable(harpq_direct_h2d_unavailable tests/direct_h2d_unavailable.cpp)
+  target_compile_features(harpq_direct_h2d_unavailable PRIVATE cxx_std_17)
+  add_test(NAME native.cuda_direct_packet_io COMMAND harpq_direct_h2d_unavailable)
+  set_tests_properties(native.cuda_direct_packet_io PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
 if(UNIX)
   find_package(Threads REQUIRED)
   add_library(harpq_packet_io STATIC

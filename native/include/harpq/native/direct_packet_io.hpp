@@ -1,6 +1,7 @@
 #ifndef HARPQ_NATIVE_DIRECT_PACKET_IO_HPP_
 #define HARPQ_NATIVE_DIRECT_PACKET_IO_HPP_
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -96,6 +97,9 @@ struct DirectPacketLoadResult {
   std::optional<ReadySlotLease> ready;
   DirectPacketReadStats stats{};
   PacketIoFailure failure{};
+  // Present for Submitted/Ready only, sampled immediately before the first
+  // SQE preparation. Process-local monotonic time; never serialize its epoch.
+  std::optional<std::chrono::steady_clock::time_point> submitted_at;
 };
 
 namespace detail {
@@ -120,10 +124,9 @@ class DirectPacketIoTestAccess;
 // make an inherited ordinary-read destination or allocator state safe. The PID
 // guard is defense in depth for an accidental child call, not fork support.
 //
-// This first slice is a CPU PacketRing direct-I/O correctness adapter, not a
-// CUDA ownership bridge. It must not be pointed through CudaPacketRing private
-// storage or used to infer that CUDA shared-control lifetime extends through an
-// outstanding read CQE; that composition requires a separate owning adapter.
+// This class owns CPU leases only. CudaDirectPackFile supplies a retained CUDA
+// owner when composing it with registered storage; raw core access is not a
+// substitute for that ownership.
 class DirectPackFile final {
  public:
   DirectPackFile(std::string path,

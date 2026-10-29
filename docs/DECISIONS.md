@@ -347,6 +347,42 @@ Trace format v2 serializes feedback configuration, request service class, ordere
 the resulting transfer estimates. Trace v1 remains readable and exactly replayable under its old
 modeled/explicit-cost semantics, and v1 artifacts cannot silently acquire v2 feedback fields.
 
+## D-027 — An owning direct-I/O/CUDA bridge reports host-observed service costs
+
+Status: accepted for the fifth correctness slice; performance acceptance remains open.
+
+`CudaDirectPackFile` retains a private shared `CudaPacketRing` facade before constructing its
+`DirectPackFile`. Reverse member destruction drains original CQEs before releasing registration.
+Only this owning adapter may bind to the core ring; no public raw-core accessor is exposed.
+This narrowly scoped friendship supersedes D-025's composition restriction without changing the
+standalone CPU reader's lifetime contract. The original CUDA facade may move or die; each ready
+or in-flight CUDA lease retains the same control independently. No extra io_uring fixed-buffer
+registration or CPU copy is introduced.
+
+The ready lease can enqueue H2D without the original facade. `CudaPacketTransfer` owns the GPU
+allocation and in-flight lease, with completion proved before destination destruction. Allocation
+or safely recovered enqueue errors preserve the ready lease. The existing fail-closed CUDA rule
+still applies. Downstream compute is outside this ownership boundary: consumers must retain the
+transfer through their own completion, and call `MakeStreamWait` before polling/waiting recycles
+its event. This avoids pretending to track arbitrary external CUDA streams.
+
+Per-packet `cudaMalloc/cudaFree` is a correctness-first limitation, not a device cache. Replace it
+with bounded reusable allocations when the GPU cache is implemented; do not claim overlap or
+steady-state throughput from this path.
+
+Capture `steady_clock` immediately before preparing the first read SQE, preserving it across
+short-read retries. Successful H2D event observation closes the end-to-end interval. Emit only
+durations, never process-local clock epochs. `io_service_us` ends after CQE handling/CRC/wrapping;
+`h2d_service_us` begins after destination allocation and ends at host-observed event completion.
+The gap, including allocation and caller dispatch delay, remains in `critical_path_us`. These are
+conservative host-observed costs, not device-event bandwidth measurements. Failed/cancelled or
+abandoned transfers emit no success observation. `physical_io_bytes` counts successful CQE bytes.
+
+Use service class `direct-h2d/host-observed-v1`; the caller assigns globally ordered sequence IDs
+when exporting to D-026's schema, never reuses source-scoped operation IDs as global IDs. The
+native fixture emits nine samples for schema/p95/replay checks only. Production feedback requires
+representative queueing/warm-up and matched fio/H2D measurements. Pack v1 and trace v2 are unchanged.
+
 ## Open decisions for Linux evidence
 
 - final tile aggregation and coalescing metadata;
