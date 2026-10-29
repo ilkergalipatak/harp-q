@@ -1,10 +1,11 @@
 # Native Ubuntu host baseline
 
-Latest correctness verification: 2026-10-29. Performance measurements date from 2026-08-09.
+Latest correctness verification and bounded SSD/H2D sweep: 2026-10-30 Europe/Istanbul
+(2026-10-29 UTC). Historical August measurements remain attributed separately below.
 This is a small reproducibility summary; raw passive, active, and microbenchmark outputs remain
 ignored artifacts on the measured host.
 
-The performance measurements below were rebuilt from clean source commit
+The historical August performance measurements were rebuilt from clean source commit
 `2a6c481a077fd11e46fc5e68a6da10b78389a9d5`. The newer packet-ring and `pread -> H2D`
 correctness evidence was rebuilt separately from clean source commit
 `9cc7dc593ab8c650dd7d21a41dd31e4b2492e246`. Both commits are on branch `main`; no old
@@ -37,6 +38,84 @@ Xorg, GNOME, Firefox, and Nautilus. Performance runs must record or eliminate th
 The initial scratch path resolves to ext4 on `/dev/nvme0n1p4`, backed by a Samsung SSD 980 PRO
 2 TB. The mounted root filesystem exposes 1.5 TB, with approximately 1.3 TB free during the run.
 Other installed NVMe devices and unmounted partitions were not modified.
+
+## Repeated SSD/H2D baseline — 2026-10-30
+
+Source: clean `decdf707f4963b0aefae83d9252b304ef8728cc5`, CMake Release (`-O3 -DNDEBUG`), G++ 12.4,
+CUDA 12.0.140, architecture 89, CUDA/io_uring explicitly ON. Runtime algorithms are unchanged from
+the fifth slice; this commit adds measurement tools. Before measurement, the byte-identical
+verification source passed 78 Python tests, all ten native tests, and the new smoke runner's
+invalid-size/volume/mode and corrupt-CRC checks. Both Mac and Linux passed the Python suite.
+
+The scratch directory was on ext4 `/dev/nvme0n1p4` (`rw,relatime`), Samsung SSD 980 PRO 2 TB.
+The runner created/fsynced one 256 MiB synthetic pattern file and removed it afterward. No
+existing pack, raw device, clock policy or user process was modified. No model, model batch,
+context or KV cache was involved; the fixture is deterministic (`byte[index] = index % 256`).
+Each case uses 16 MiB warm-up and 256 MiB timed volume, five repetitions, and alternating method/
+size order. Native direct/bridge use one slot and QD1; fio uses QD1 or QD8; isolated H2D queues
+copies on one stream with CUDA-event timing. See `BENCHMARK_PROTOCOL.md` for endpoint differences.
+
+All rates are decimal **GB/s**, median **[min–max]** of five trials:
+
+| Payload | fio QD1 | fio QD8 | Native direct + CRC, QD1 | Native SSD→GPU, QD1 | Isolated pinned H2D |
+|---|---|---|---|---|---|
+| 64 KiB | 2.049 [1.688–2.065] | 4.067 [3.948–4.474] | 0.503 [0.353–0.515] | 0.306 [0.304–0.307] | 18.469 [18.326–18.490] |
+| 256 KiB | 2.632 [2.632–2.658] | 5.478 [5.369–5.711] | 0.524 [0.519–0.562] | 0.470 [0.469–0.471] | 24.134 [24.104–24.181] |
+| 1 MiB | 3.532 [3.532–3.532] | 5.478 [5.478–5.592] | 0.582 [0.581–0.583] | 0.542 [0.539–0.544] | 25.925 [25.919–25.989] |
+
+fio reports elapsed read time at millisecond resolution; the five 1 MiB/QD1 trials all rounded to
+76 ms. Identical displayed rates are not proof of zero variance. Larger repetitions/volumes and
+controlled background load are required for fine-grained performance claims. The 64 KiB native
+direct case varied substantially; keep its full range instead of discarding the slow first run.
+
+Bridge latency audit, median of each trial's statistic (microseconds):
+
+| Payload | Critical p50 | Critical p95 | Mean read/CRC/dispatch | Mean host-observed H2D | Mean enqueue call |
+|---|---:|---:|---:|---:|---:|
+| 64 KiB | 183.837 | 197.526 | 138.438 | 8.722 | 42.367 |
+| 256 KiB | 525.290 | 546.550 | 471.779 | 16.157 | 44.120 |
+| 1 MiB | 1898.377 | 1916.536 | 1805.812 | 52.531 | 45.857 |
+
+The enqueue call includes allocation and asynchronous submission; it overlaps the H2D observation
+interval. Do not add these columns or interpret them as CUDA-event bandwidth. Whole-loop
+throughput includes free/cleanup; per-packet critical-path latency ends before that cleanup.
+
+Inference: the current read/CRC/dispatch stage is the leading optimization target, not proof that
+PCIe is saturated. The portable byte-at-a-time CRC implementation is a candidate that must be
+profiled separately before attributing the entire gap to it. Native-direct/fio-QD1 median ratios
+are about 24.5%, 19.9% and 16.5%: well below the 75% target in this diagnostic workload. No
+throughput acceptance gate is closed. Queued H2D is not a valid 80% denominator for the differently
+timed serial runtime component. All synthetic reads had logical=physical bytes, one SQE/CQE and
+read amplification 1; this does not establish amplification for real model packet layouts.
+STATX_DIOALIGN reported memory alignment 4 and offset alignment 512; ring alignment was 4096.
+
+GPU snapshots: about 637 MiB occupied by the desktop, 0–7% utilization at snapshot times, 40–45°C,
+SM clocks 210–2565 MHz, PCIe generation 1/2/4 at x16. Clocks were not locked; snapshot values are
+not a continuous timeline. No overlap, compute kernel, cold-cache or model-throughput claim is made.
+
+Reproduce from the repository root:
+
+```sh
+cmake -S . -B build/benchmark-decdf70 -DHARPQ_ENABLE_CUDA=ON -DHARPQ_ENABLE_IO_URING=ON \
+  -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=/usr/bin/g++-12 \
+  -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-12 -DCMAKE_CUDA_ARCHITECTURES=89
+cmake --build build/benchmark-decdf70 --target harpq_transfer_benchmark harpq_h2d_benchmark --parallel 4
+PYTHONPATH=src .venv/bin/python -m harpq profile-host --output artifacts/host-transfer-decdf70.json
+.venv/bin/python scripts/benchmark_transfers.py --build build/benchmark-decdf70 \
+  --scratch "$PWD/build/benchmark-decdf70" --output benchmarks/results/transfer-decdf70-20261030
+```
+
+Choose a new output directory for reruns; the tool refuses to overwrite it. Raw records remain on
+Ubuntu in that ignored result directory: 117 JSON artifacts were checksum-verified. `sha256.json`
+lists each command/stdout/stderr record, binary hash record, snapshot and summary. Main digests:
+
+| Artifact | SHA-256 |
+|---|---|
+| `summary.json` | `1c4323062b4fdcd524be3712e915b170fb64c023817a6a7d19d9652b34442e8c` |
+| `sha256.json` | `ff808c0c178fb305aa72f1b5d9223da1cc1b898905885defdb4381aa1c18fdcf` |
+| `artifacts/host-transfer-decdf70.json` | `4bff2b2c964dc99aebdfaf36a36d939eb9a7e4400ceb5021165ce3193fd3bba4` |
+| `harpq_transfer_benchmark` binary | `af7ba6d8ce7a806d4449466ba48512494568aca3895c404edbf1cd2831dbf446` |
+| `harpq_h2d_benchmark` binary | `f2450018d5d2fdc61095a431820d74c6b186075bb07efa6ee5a5af6d5f645b8c` |
 
 ## Verified reference gates — 2026-08-09
 

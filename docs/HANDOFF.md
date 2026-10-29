@@ -1,8 +1,9 @@
 # HARP-Q handoff
 
 Latest Linux verification: 2026-10-30 Europe/Istanbul (2026-10-29 UTC) on the native Ubuntu 24.04
-RTX 4090 host. Tested source matches commit `913211e` byte-for-byte. All 74 Python tests and ten
-CPU/CUDA tests passed; the new direct-H2D bridge also passed UBSan and measured-sample replay.
+RTX 4090 host. Tested source matches commit `decdf70` byte-for-byte. All 78 Python tests and ten
+CPU/CUDA tests passed. A five-repeat SSD/H2D/native-path baseline is recorded in `HOST_BASELINE.md`;
+the earlier direct-H2D bridge also passed UBSan and measured-sample replay.
 Earlier Mac and performance evidence is dated separately below. This file is the recovery source if the
 Codex task cannot be handed off directly.
 
@@ -10,8 +11,8 @@ Codex task cannot be handed off directly.
 
 - Remote: `https://github.com/ilkergalipatak/harp-q.git`
 - Branch: `main`
-- Latest validated runtime source commit: `913211e42fc9e7778c995eda240b8b5fa40d3643`
-- Performance-baseline source commit: `2a6c481a077fd11e46fc5e68a6da10b78389a9d5`
+- Latest validated source / SSD-H2D baseline: `decdf707f4963b0aefae83d9252b304ef8728cc5`
+- Historical GEMV/performance baseline: `2a6c481a077fd11e46fc5e68a6da10b78389a9d5`
 - Python package: `harpq`, Python 3.11+
 - Native floor: CMake 3.24+, C++17; CUDA toolkit 11.8+ when enabled
 - Validated Mac runtime: Python 3.12.14, NumPy 2.3.5
@@ -99,6 +100,11 @@ The fifth slice adds a lifetime-safe storage-to-device path:
   remain part of the critical path; these are not isolated device-event timings.
 - `scripts/check_native_feedback.py` checks the native fixture's nine observations against exact
   byte/class buckets, default p95 selection and deterministic trace round-trip/replay.
+
+The measurement slice adds `harpq_transfer_benchmark` and `scripts/benchmark_transfers.py` without
+changing runtime algorithms: bounded QD1 direct/bridge timing, fio QD1/QD8, and isolated pinned H2D.
+It records five-repeat medians/ranges, raw commands, snapshots and hashes; no acceptance/model or
+overlap claim. Full settings and current results are in `HOST_BASELINE.md`.
 
 Architecture decisions are in `DECISIONS.md`; file/layout contracts are in `FORMAT.md`; benchmark
 gates are in `BENCHMARK_PROTOCOL.md`; the measured host summary is in `HOST_BASELINE.md`.
@@ -306,6 +312,35 @@ git ls-files -z CMakeLists.txt native src tests scripts Makefile pyproject.toml 
   | xargs -0 sha256sum | sha256sum
 ```
 
+### 2026-10-30 — repeated transfer measurement
+
+Clean `decdf707f4963b0aefae83d9252b304ef8728cc5` was rebuilt in Release on Ubuntu for the actual
+measurement. The separate verification directory's source digest matched it exactly:
+`2f858b6806db6381b31995e58cf034c7c1ad6b4a928eb6b24754043af3b21edb` using the source-list command
+above. All 78 Python tests, doctor and golden drift passed on Mac/Linux; all ten CUDA-ON/io_uring-ON
+native tests passed. The benchmark smoke round additionally rejected bad size/volume/mode and
+CRC-corrupt files in both direct/bridge modes, and checked byte totals/D2H. Inverting the fio
+zero-write guard caused its unit test to fail; after restoring it all 78 Mac tests passed again.
+
+The actual sweep used three sizes, five repetitions, 16 MiB warm-up and 256 MiB timed volume per
+case. At 1 MiB, median fio QD1/QD8 was 3.532/5.478 GB/s; isolated H2D was 25.925 GB/s; the unchanged
+native direct+CRC/bridge paths reached only 0.582/0.542 GB/s. These results establish a measured
+software-path bottleneck; they do not justify disabling CRC or claiming throughput acceptance.
+The native I/O stage includes CRC and dispatch, so isolate/profile those before attributing cost.
+
+Raw results, GPU snapshots, method differences, uncertainty and checksums are in `HOST_BASELINE.md`.
+All 117 result JSON hashes were verified and the temporary 256 MiB synthetic pack was removed.
+Test logs remain under the Ubuntu clone's ignored `build/evidence-decdf70-20261030/`:
+
+| Artifact | SHA-256 |
+|---|---|
+| `cuda.log` | `c145b1ccf98413503defd6ae698ddcd197bf05e6dca4857d779ca24b2d630a7f` |
+| `smoke-sha256.json` | `c95d6c643d1ccad9626011e6d0758b87920a84ce89d085e40ceeda85009071f3` |
+
+No new CPU-only native configure, sanitizer, model, optimized-W4, cold-cache or overlap run was
+performed in this measurement slice. No CUDA/runtime algorithm, quantizer, format or dependency
+was changed; the user's unrelated local `AGENTS.md` edits were preserved.
+
 ## Known limits — do not overclaim
 
 - The direct-decode CUDA path is batch-one GEMV only. It has no tensor-core/GEMM path and is not yet
@@ -324,8 +359,9 @@ git ls-files -z CMakeLists.txt native src tests scripts Makefile pyproject.toml 
   adaptive SSD/cache placement requires a measured coalescing/chunking decision and likely a
   versioned format extension.
 - No PyTorch custom op, Mistral/Mixtral adapter, real checkpoint, or model-quality evaluation exists.
-- The host profiler's fio and H2D values are bounded capability denominators only. Runtime H2D,
-  overlap, read amplification, TTFT, inter-token latency, and Pareto gates remain open.
+- The repeated SSD/H2D sweep is a bounded warm synthetic baseline, not production acceptance.
+  Native direct performance is far below its QD1 fio denominator; runtime H2D, overlap, real-packet
+  read amplification, TTFT, inter-token latency and Pareto gates remain open.
 - Native service observations now populate trace v2 in a functional integration check; their
   small synthetic sample set is not production calibration. No live native scheduler is connected.
 - Direct-I/O operation IDs are monotonic only within one `DirectPackFile`; multi-pack tracing must
@@ -338,13 +374,17 @@ git ls-files -z CMakeLists.txt native src tests scripts Makefile pyproject.toml 
 
 ## Exact next implementation action
 
-Build a reproducible, bounded runtime benchmark at 64 KiB, 256 KiB and 1 MiB with matched fio and
-registered-H2D denominators: identical effective queue depth, volume, warm-up and repetitions.
-Record host-observed service cost separately from CUDA-event transfer timing; do not turn the
-correctness fixture's three samples per bucket into an acceptance result. Establish the cost of
-per-packet allocation before replacing it with bounded reusable GPU storage, then extend ownership
-through downstream compute when introducing the GPU cache. Preserve cancellation, backpressure,
-required/optional and fail-closed safety semantics. Measure actual overlap with an event timeline.
+Profile the now-measured read/CRC/dispatch bottleneck before optimizing. Add a bounded standalone
+CRC32C cost measurement and, when available, CPU sampling of the native direct loop; distinguish
+CPU checksum work, submission/completion overhead and storage wait. The portable CRC loop is a
+candidate, not yet a measured attribution. If it dominates, introduce a feature-detected accelerated
+path with the current portable implementation as fallback, preserving incremental CRC and every
+corruption/optional/base safety test. Rerun exactly the committed sweep and retain an optimization
+only if it beats variance without dropping validation.
+
+Then address per-packet GPU allocation and queueing using measured evidence, bounded reusable
+storage and ownership through downstream compute. Preserve cancellation, backpressure and the
+fail-closed rule; measure overlap with an event timeline instead of inferring it from components.
 
 Production scheduler feedback must be calibrated for its actual service class and exact byte
 bucket. The 80% H2D, 75% fio, read-amplification and optimized-W4 gates remain open. Do not begin
